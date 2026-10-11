@@ -15,6 +15,8 @@
         mature: true,
         privateOnly: false,
         ageOk: false,
+        voice: '',
+        rate: 1,
       },
       characters: [],
       stories: [],
@@ -337,6 +339,24 @@
     return rec;
   }
 
+  // Narration: browsers (Chrome especially) cut off long utterances, so speak sentence-sized pieces of at most `max` chars.
+  function speechChunks(text, max = 200) {
+    const out = [];
+    let para = true; // a new paragraph always starts a new piece, so the voice pauses there
+    for (const sentence of (text || '').match(/[^.!?\n]+[.!?]*["'”’)]*|\n+/g) || []) {
+      let rest = sentence.trim();
+      while (rest.length > max) {
+        const cut = rest.lastIndexOf(' ', max) > 0 ? rest.lastIndexOf(' ', max) : max;
+        out.push(rest.slice(0, cut)); rest = rest.slice(cut).trim();
+      }
+      if (!rest) { para = true; continue; }
+      if (!para && out[out.length - 1].length + rest.length + 1 <= max) out[out.length - 1] += ' ' + rest;
+      else out.push(rest);
+      para = false;
+    }
+    return out;
+  }
+
   // OpenRouter can answer 200 with {"error": ...} instead of choices when the model's provider fails or is busy.
   function providerError(d) {
     const e = d && d.error;
@@ -411,7 +431,7 @@
   const unseal = decryptWith;
 
   const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
-    buildReviseSheetMessages, buildReviseStoryMessages, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
+    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

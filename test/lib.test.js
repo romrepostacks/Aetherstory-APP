@@ -193,3 +193,13 @@ test('provider errors sent instead of a reply become readable, retryable errors'
   assert.throws(() => A.replyText({}), /empty reply/);
   assert.match(A.parseSSE('data: {"error":{"code":502,"message":"Provider down"}}\n').error.message, /Provider down/);
 });
+
+test('narration splits text into short, complete pieces that keep every word', () => {
+  const text = 'She ran. "Wait!" he called?\n\nThe rain ' + 'fell and fell '.repeat(30) + 'until dawn.';
+  const parts = A.speechChunks(text, 60);
+  assert.ok(parts.every((p) => p.length <= 60 && p.trim() === p && p));
+  assert.strictEqual(parts.join(' ').split(/\s+/).join(' '), text.split(/\s+/).join(' '));
+  assert.strictEqual(parts[0], 'She ran. "Wait!" he called?');
+  assert.match(parts[1], /^The rain/);
+  assert.deepStrictEqual(A.speechChunks(''), []);
+});

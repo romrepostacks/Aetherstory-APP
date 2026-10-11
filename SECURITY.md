@@ -24,8 +24,9 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
    - **OpenRouter** relays it. Users should keep prompt logging off in their OpenRouter privacy settings.
    - **The model's provider** runs it. Free models are often served by providers that may keep or train on prompts, which is why OpenRouter makes free models a separate opt-in in its privacy settings. **Private mode** (Settings) adds `provider.data_collection = "deny"`, so OpenRouter only routes to providers that don't store or train on prompts. Some free models stop working when it's on.
 2. **World revisions** (Revise tab) send the revision text, every character sheet and the world notes, then each story that mentions an affected character, in full, to the same AI provider. A story already goes there when it is written or continued, so no new party sees it, but one revision can resend many stories at once. The app shows every change before saving and applies nothing the user hasn't confirmed; edits that don't match the story's exact text are dropped.
-3. **Loading the app** from GitHub Pages. GitHub sees the visitor's IP address like any web host. No story data is involved.
-4. Nothing else. The Content Security Policy blocks scripts from anywhere but the app itself.
+3. **Narration (🔊 Listen)** uses the browser's built-in speech voices. Most run on the device and send nothing. Some are cloud voices (for example Edge's "Online (Natural)" voices or Chrome's "Google" voices): those send the story text to Microsoft or Google to be spoken. The voice picker marks them "online", and **Private mode** hides them and never uses them. No new code or network address was added to the app for this; it is the browser's own speech feature.
+4. **Loading the app** from GitHub Pages. GitHub sees the visitor's IP address like any web host. No story data is involved.
+5. Nothing else. The Content Security Policy blocks scripts from anywhere but the app itself.
 
 ## Protections in place
 

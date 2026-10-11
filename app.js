@@ -108,6 +108,36 @@ async function chatJson(messages) {
   return A.parseJsonLoose(await chat(messages, { stream: false }));
 }
 
+// ---------- narration: the browser's own voices, free with no setup ----------
+const canSpeak = 'speechSynthesis' in window;
+// Private mode keeps to voices that run on the device; some browser voices (e.g. Edge "Online", Google) send the text to their maker.
+const voices = () => (canSpeak ? speechSynthesis.getVoices() : []).filter((v) => v.localService || !state.settings.privateOnly);
+function pickVoice() {
+  const all = voices(), lang = (navigator.language || 'en').slice(0, 2);
+  const mine = all.filter((v) => v.lang.startsWith(lang));
+  // Automatic: the most natural-sounding voice in the reader's language.
+  return all.find((v) => v.voiceURI === state.settings.voice) || mine.find((v) => /natural|neural|premium|enhanced/i.test(v.name)) || mine.find((v) => v.default) || mine[0];
+}
+let speaking = null; // { id } of the story being read aloud
+const listenLabel = (id) => (speaking && speaking.id === id ? '⏹ Stop' : '🔊 Listen');
+function narrate(id, text) {
+  speechSynthesis.cancel();
+  const me = speaking = speaking && speaking.id === id ? null : { id };
+  const btn = document.getElementById('listen');
+  if (btn) btn.textContent = listenLabel(id);
+  if (!me) return;
+  const parts = A.speechChunks(text), voice = pickVoice();
+  parts.forEach((p, i) => {
+    const u = new SpeechSynthesisUtterance(p);
+    if (voice) { u.voice = voice; u.lang = voice.lang; }
+    u.rate = Number(state.settings.rate) || 1;
+    // cancel() fires end/error on the old queue too, so only the current reading resets the button.
+    if (i === parts.length - 1) u.onend = u.onerror = () => { if (speaking !== me) return; speaking = null; const b = document.getElementById('listen'); if (b) b.textContent = listenLabel(id); };
+    speechSynthesis.speak(u);
+  });
+}
+const listenBtn = (story) => canSpeak && h('button', { class: 'btn ghost', id: 'listen', onclick: () => narrate(story.id, `${story.title}.\n\n${story.text}`) }, listenLabel(story.id));
+
 // ---------- tiny DOM helper ----------
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -300,6 +330,7 @@ const VIEWS = {
       nodes.push(h('h2', {}, story.title), h('div', { class: 'prose', id: 'output' }, story.text));
       if (!ui.busy) nodes.push(h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: () => generate(story.id) }, 'Continue story'),
+        listenBtn(story),
         h('button', { class: 'btn ghost', onclick: () => { ui.currentId = null; ui.premise = ''; ui.status = ''; render(); } }, 'New story')),
         h('p', { class: 'muted' }, 'Continue uses the Premise box above as direction for the next part, if you fill it in.'));
     } else if (ui.busy) nodes.push(h('div', { class: 'prose', id: 'output' }));
@@ -452,6 +483,7 @@ const VIEWS = {
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
       h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
       ...field('Instructions applied to every story', style),
+      canSpeak && narrationSettings(),
       h('h2', {}, 'App lock'),
       lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
         h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => location.reload() }, 'Lock now'),
@@ -467,16 +499,30 @@ const VIEWS = {
   },
 };
 
+function narrationSettings() {
+  const s = state.settings;
+  const voice = h('select', { onchange: (e) => { s.voice = e.target.value; save(); } },
+    h('option', { value: '' }, `Automatic${pickVoice() ? ` (${pickVoice().name})` : ''}`),
+    voices().map((v) => h('option', { value: v.voiceURI, selected: v.voiceURI === s.voice }, `${v.name} (${v.lang})${v.localService ? '' : ' · online'}`)));
+  const rate = h('select', { onchange: (e) => { s.rate = Number(e.target.value); save(); } },
+    [[0.8, 'Slow'], [1, 'Normal'], [1.2, 'Fast'], [1.5, 'Faster']].map(([v, l]) => h('option', { value: v, selected: Number(s.rate) === v }, l)));
+  return [h('h2', {}, 'Narration'),
+    h('p', { class: 'muted' }, 'Tap 🔊 Listen on any story to hear it read aloud. It uses the voices built into your phone or browser, so it is free. Voices marked "online" send the story text to your browser\'s maker to be spoken; Private mode hides them.'),
+    ...field('Voice', voice), ...field('Speed', rate),
+    h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: () => narrate('preview', 'Once upon a time, in a world of your own making, a story began.') }, listenLabel('preview')))];
+}
+
 function storyReader(story) {
   if (!story) return VIEWS.stories();
   return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('stories') }, '← All stories')),
     h('h2', {}, story.title),
     h('p', { class: 'muted' }, [fmtDate(story.createdAt), (story.characterIds || []).map(charName).filter(Boolean).join(', ')].filter(Boolean).join(' · ')),
     story.summary && h('p', { class: 'muted' }, story.summary),
+    canSpeak && h('div', { class: 'row' }, listenBtn(story)),
     h('div', { class: 'prose' }, story.text),
     h('div', { class: 'row' },
       h('button', { class: 'btn', disabled: ui.busy, onclick: () => { ui.premise = ''; generate(story.id); } }, 'Continue story'),
-      h('button', { class: 'btn danger', onclick: async () => { if (!confirm('Delete this story? Its effects on the world stay.')) return; state.stories = state.stories.filter((s) => s !== story); await save(); go('stories'); } }, 'Delete'))];
+      h('button', { class: 'btn danger', onclick: async () => { if (!confirm('Delete this story? Its effects on the world stay.')) return; if (speaking && speaking.id === story.id) narrate(story.id); state.stories = state.stories.filter((s) => s !== story); await save(); go('stories'); } }, 'Delete'))];
 }
 
 function characterEditor(c) {
@@ -556,5 +602,6 @@ async function eraseAll() {
   // Anything that slips past a try/catch still shows up instead of failing silently.
   addEventListener('unhandledrejection', (e) => setStatus('Error: ' + ((e.reason && e.reason.message) || e.reason)));
   render();
+  if (canSpeak) speechSynthesis.addEventListener('voiceschanged', () => { if (ui.view === 'settings') render(); });
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
