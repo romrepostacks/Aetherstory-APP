@@ -112,31 +112,59 @@ async function chatJson(messages) {
 const canSpeak = 'speechSynthesis' in window;
 // Private mode keeps to voices that run on the device; some browser voices (e.g. Edge "Online", Google) send the text to their maker.
 const voices = () => (canSpeak ? speechSynthesis.getVoices() : []).filter((v) => v.localService || !state.settings.privateOnly);
-function pickVoice() {
+const NATURAL = /natural|neural|premium|enhanced/i;
+// Voices in the reader's language, most natural-sounding first.
+function langVoices() {
   const all = voices(), lang = (navigator.language || 'en').slice(0, 2);
   const mine = all.filter((v) => v.lang.startsWith(lang));
-  // Automatic: the most natural-sounding voice in the reader's language.
-  return all.find((v) => v.voiceURI === state.settings.voice) || mine.find((v) => /natural|neural|premium|enhanced/i.test(v.name)) || mine.find((v) => v.default) || mine[0];
+  return (mine.length ? mine : all).sort((a, b) => NATURAL.test(b.name) - NATURAL.test(a.name));
 }
-let speaking = null; // { id } of the story being read aloud
+function pickVoice() {
+  const all = langVoices();
+  return voices().find((v) => v.voiceURI === state.settings.voice) || all.find((v) => NATURAL.test(v.name)) || all.find((v) => v.default) || all[0];
+}
+// A character's own voice, or one picked to match them: same gender, not the narrator's, and different from the other characters' where there are enough voices.
+function characterVoice(c) {
+  const chosen = voices().find((v) => v.voiceURI === c.voice);
+  if (chosen) return { voice: chosen, pitch: 1 };
+  const narrator = pickVoice(), g = A.characterGender(c);
+  const pool = langVoices().filter((v) => v !== narrator && (!g || A.voiceGender(v.name) === g));
+  const peers = state.characters.filter((x) => !x.voice && A.characterGender(x) === g);
+  if (pool.length) return { voice: pool[Math.max(0, peers.findIndex((x) => x.id === c.id)) % pool.length], pitch: 1 };
+  // Only the narrator's voice fits: shift its pitch so the character still sounds different.
+  return { voice: narrator, pitch: g === 'm' ? 0.8 : 1.2 };
+}
+// The story as spoken lines: narration in the narrator's voice (or the point-of-view character's, for first person), dialogue in each speaker's.
+function storyLines(story) {
+  const cast = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
+  const pov = state.characters.find((c) => c.id === story.pov);
+  const voiceOf = (id) => { const c = state.characters.find((x) => x.id === id); return c ? characterVoice(c) : { voice: pickVoice(), pitch: 1 }; };
+  return [{ text: story.title + '.', id: null }, ...A.speechParts(story.text, cast.length ? cast : state.characters)]
+    .map((p) => ({ text: p.text, ...voiceOf(p.id || (pov && pov.id)) }));
+}
+let speaking = null; // { id } of what is being read aloud
 const listenLabel = (id) => (speaking && speaking.id === id ? '⏹ Stop' : '🔊 Listen');
-function narrate(id, text) {
+// Plays [{ text, voice, pitch }] in order; tapping the same button again stops it.
+function narrate(id, lines) {
   speechSynthesis.cancel();
   const me = speaking = speaking && speaking.id === id ? null : { id };
   const btn = document.getElementById('listen');
   if (btn) btn.textContent = listenLabel(id);
   if (!me) return;
-  const parts = A.speechChunks(text), voice = pickVoice();
-  parts.forEach((p, i) => {
-    const u = new SpeechSynthesisUtterance(p);
-    if (voice) { u.voice = voice; u.lang = voice.lang; }
+  const utts = lines.flatMap((l) => A.speechChunks(l.text).map((t) => {
+    const u = new SpeechSynthesisUtterance(t);
+    if (l.voice) { u.voice = l.voice; u.lang = l.voice.lang; }
+    u.pitch = l.pitch || 1;
     u.rate = Number(state.settings.rate) || 1;
-    // cancel() fires end/error on the old queue too, so only the current reading resets the button.
-    if (i === parts.length - 1) u.onend = u.onerror = () => { if (speaking !== me) return; speaking = null; const b = document.getElementById('listen'); if (b) b.textContent = listenLabel(id); };
-    speechSynthesis.speak(u);
-  });
+    return u;
+  }));
+  // cancel() fires end/error on the old queue too, so only the current reading resets the button.
+  const last = utts[utts.length - 1];
+  if (last) last.onend = last.onerror = () => { if (speaking !== me) return; speaking = null; const b = document.getElementById('listen'); if (b) b.textContent = listenLabel(id); };
+  utts.forEach((u) => speechSynthesis.speak(u));
 }
-const listenBtn = (story) => canSpeak && h('button', { class: 'btn ghost', id: 'listen', onclick: () => narrate(story.id, `${story.title}.\n\n${story.text}`) }, listenLabel(story.id));
+const listenBtn = (story) => canSpeak && h('button', { class: 'btn ghost', id: 'listen', onclick: () => narrate(story.id, storyLines(story)) }, listenLabel(story.id));
+const voiceOptions = (selected) => voices().map((v) => h('option', { value: v.voiceURI, selected: v.voiceURI === selected }, `${v.name} (${v.lang})${v.localService ? '' : ' · online'}`));
 
 // ---------- tiny DOM helper ----------
 function h(tag, attrs, ...kids) {
@@ -502,14 +530,14 @@ const VIEWS = {
 function narrationSettings() {
   const s = state.settings;
   const voice = h('select', { onchange: (e) => { s.voice = e.target.value; save(); } },
-    h('option', { value: '' }, `Automatic${pickVoice() ? ` (${pickVoice().name})` : ''}`),
-    voices().map((v) => h('option', { value: v.voiceURI, selected: v.voiceURI === s.voice }, `${v.name} (${v.lang})${v.localService ? '' : ' · online'}`)));
+    h('option', { value: '' }, `Automatic${pickVoice() ? ` (${pickVoice().name})` : ''}`), voiceOptions(s.voice));
   const rate = h('select', { onchange: (e) => { s.rate = Number(e.target.value); save(); } },
     [[0.8, 'Slow'], [1, 'Normal'], [1.2, 'Fast'], [1.5, 'Faster']].map(([v, l]) => h('option', { value: v, selected: Number(s.rate) === v }, l)));
   return [h('h2', {}, 'Narration'),
-    h('p', { class: 'muted' }, 'Tap 🔊 Listen on any story to hear it read aloud. It uses the voices built into your phone or browser, so it is free. Voices marked "online" send the story text to your browser\'s maker to be spoken; Private mode hides them.'),
-    ...field('Voice', voice), ...field('Speed', rate),
-    h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: () => narrate('preview', 'Once upon a time, in a world of your own making, a story began.') }, listenLabel('preview')))];
+    h('p', { class: 'muted' }, 'Tap 🔊 Listen on any story to hear it read aloud. Each character speaks their lines in their own voice, picked to match them; change it on their page in the Cast tab. It uses the voices built into your phone or browser, so it is free. Voices marked "online" send the story text to your browser\'s maker to be spoken; Private mode hides them.'),
+    h('p', { class: 'muted' }, 'For the most natural voices, free: on iPhone go to Settings → Accessibility → Read & Speak → Voices → English and download a few "Premium" or "Enhanced" voices (e.g. Ava, Zoe, Evan, Nathan), then reopen this app. On a PC, open the app in Microsoft Edge for its "Natural" voices.'),
+    ...field('Narrator voice', voice), ...field('Speed', rate),
+    h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: () => narrate('preview', [{ text: 'Once upon a time, in a world of your own making, a story began.', voice: pickVoice() }]) }, listenLabel('preview')))];
 }
 
 function storyReader(story) {
@@ -550,12 +578,16 @@ function characterEditor(c) {
     if (!c) state.characters.push(target);
     await save(); go('characters');
   };
+  const voice = canSpeak && h('select', {}, h('option', { value: '' }, 'Automatic, matched to the character'), voiceOptions(draft.voice));
+  if (voice) inputs.voice = voice;
+  const hear = () => narrate('voice', [{ text: `Hi, I'm ${inputs.name.value.trim() || 'new here'}.`, ...characterVoice({ ...draft, ...Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value])) }) }]);
   const appearsIn = c ? state.stories.filter((s) => (s.characterIds || []).includes(c.id)) : [];
   return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('characters') }, '← Cast')),
     h('h2', {}, c ? c.name : 'New character'),
     !c && [idea, h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: aiFill }, '✨ Fill in with AI'))],
     ...mk('name', 'Name'), ...mk('appearance', 'Appearance', true), ...mk('personality', 'Personality', true), ...mk('background', 'Background', true),
     ...field('Story developments (added automatically, one per line)', dev),
+    voice && [...field('Voice when stories are read aloud', voice), h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: hear }, listenLabel('voice')))],
     status,
     h('div', { class: 'row' }, h('button', { class: 'btn', onclick: saveChar }, 'Save'),
       c && h('button', { class: 'btn danger', onclick: async () => { if (!confirm(`Delete ${c.name}?`)) return; state.characters = state.characters.filter((x) => x !== c); ui.selected = ui.selected.filter((x) => x !== c.id); await save(); go('characters'); } }, 'Delete')),

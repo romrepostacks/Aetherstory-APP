@@ -203,3 +203,17 @@ test('narration splits text into short, complete pieces that keep every word', (
   assert.match(parts[1], /^The rain/);
   assert.deepStrictEqual(A.speechChunks(''), []);
 });
+
+test('dialogue is voiced by the character named nearest the quote', () => {
+  const cast = [{ id: 'a', name: 'Mira Vale' }, { id: 'b', name: 'Toren' }];
+  const parts = A.speechParts('The rain fell.\n\n"Run," Mira said. "Now!"\n\nToren froze. “Why?”\n\n"Because," she whispered.', cast);
+  assert.deepStrictEqual(parts.map((p) => [p.text, p.id]), [
+    ['The rain fell.', null], ['"Run,"', 'a'], ['Mira said.', null], ['"Now!"', 'a'],
+    ['Toren froze.', null], ['“Why?”', 'b'], ['"Because,"', null], ['she whispered.', null]]);
+  assert.strictEqual(A.characterGender({ personality: 'She is bold; her ship is her life.' }), 'f');
+  assert.strictEqual(A.characterGender({ background: 'He lost his brother.' }), 'm');
+  assert.strictEqual(A.voiceGender('Microsoft Aria Online (Natural)'), 'f');
+  assert.strictEqual(A.voiceGender('Google UK English Male'), 'm');
+  assert.strictEqual(A.voiceGender('Samantha'), 'f');
+  assert.strictEqual(A.voiceGender('Evan (Enhanced)'), 'm');
+});

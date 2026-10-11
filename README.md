@@ -22,7 +22,7 @@ After each story the app asks the AI what changed and updates the world, the cha
 
 **Revise** fixes a detail everywhere at once. Type the change in plain words ("Ana has red hair, not black"); the AI updates the character sheets, the world notes and every saved story that contradicts it, shows each change for review, and applies them on one tap. The last five revisions can be undone. Future stories follow the change because they read the updated sheets.
 
-**Listen** reads any story aloud with the voices built into your phone or browser, free and with no setup. Pick the voice and speed under *Settings → Narration*.
+**Listen** reads any story aloud with the voices built into your phone or browser, free and with no setup. Each character speaks their dialogue in their own voice, matched to them automatically (change it on their Cast page). Pick the narrator voice and speed under *Settings → Narration*; downloading "Premium" voices on iPhone or using Edge on PC makes it sound far more natural.
 
 ## AI providers
 

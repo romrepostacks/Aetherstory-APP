@@ -357,6 +357,45 @@
     return out;
   }
 
+  // Splits a story into narration and quoted dialogue. Each quote's speaker is the character named closest to it in the same paragraph.
+  // ponytail: name-proximity guess ("she said" lines with no name nearby go to the narrator); ask the AI to tag speakers if it misfires a lot.
+  function speechParts(text, characters = []) {
+    const names = characters.flatMap((c) => (c.name || '').split(/\s+/).filter((n) => n.length > 1)
+      .map((n) => [new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), c.id]));
+    const nearest = (str, fromEnd) => {
+      let best = null, dist = Infinity;
+      for (const [re, id] of names) for (const m of str.matchAll(re)) {
+        const d = fromEnd ? str.length - m.index - m[0].length : m.index;
+        if (d < dist) { dist = d; best = id; }
+      }
+      return [best, dist];
+    };
+    const parts = [];
+    for (const para of (text || '').split(/\n\s*\n/)) {
+      const pieces = para.split(/("[^"\n]+"|“[^”\n]+”)/); // odd indexes are the quotes
+      pieces.forEach((p, i) => {
+        if (!p.trim()) return;
+        let id = null;
+        if (i % 2) {
+          const [after, da] = nearest(pieces[i + 1] || '', false), [before, db] = nearest(pieces[i - 1] || '', true);
+          id = da <= db ? after : before;
+        }
+        parts.push({ text: p.trim(), id });
+      });
+    }
+    return parts;
+  }
+  // Guesses from the pronouns in a character's sheet: 'f', 'm' or null.
+  function characterGender(c) {
+    const t = [c.appearance, c.personality, c.background, ...(c.developments || [])].join(' ').toLowerCase();
+    const f = (t.match(/\b(she|her|hers|herself)\b/g) || []).length, m = (t.match(/\b(he|him|his|himself)\b/g) || []).length;
+    return f > m ? 'f' : m > f ? 'm' : null;
+  }
+  // Browsers don't say a voice's gender, so go by the names the common Apple, Microsoft and Google voices use.
+  const FEMALE_VOICE = /female|samantha|\bava\b|allison|susan|victoria|karen|moira|tessa|fiona|serena|kate|zoe|nicky|joelle|aria|jenny|michelle|emma|sonia|libby|natasha|clara|zira|hazel|heera|catherine|veena|amelie|anna|alice|ellen|sara|paulina|monica|luciana|kyoko|\bana\b|salli|joanna|kendra|ivy|ruth|elizabeth|ashley|cora|jane|nancy|maisie|isla|molly/i;
+  const MALE_VOICE = /\bmale|alex|daniel|fred|\btom\b|aaron|arthur|oliver|gordon|rishi|evan|nathan|\bguy\b|ryan|christopher|eric|roger|steffan|brian|andrew|davis|david|mark|george|james|william|thomas|reed|rocko|eddy|jorge|diego|luca|matthew|joey|justin|kevin|liam|noah|tony|jason|ethan|elliot/i;
+  const voiceGender = (name) => (FEMALE_VOICE.test(name) ? 'f' : MALE_VOICE.test(name) ? 'm' : null);
+
   // OpenRouter can answer 200 with {"error": ...} instead of choices when the model's provider fails or is busy.
   function providerError(d) {
     const e = d && d.error;
@@ -431,7 +470,7 @@
   const unseal = decryptWith;
 
   const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
-    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
+    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, characterGender, voiceGender, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
