@@ -15,6 +15,7 @@ This file is the living record of how the app protects its users. **Every change
 | Backup files | Wherever the user saves them | AES-256-GCM with the device key. Tampering or a wrong key is detected and refused. |
 | World revision undo history | In the library record, so it is sealed by App lock and included in backups like everything else | Keeps the replaced text of edited stories and sheets for the last 5 revisions, so the user can undo. Erase everything removes it. |
 | Age confirmation | In the library settings | Not sensitive. |
+| Premium narration audio (Venice) | IndexedDB, one record per spoken passage | Plain audio of story text, so only written while App lock is off. Erase everything deletes it. |
 
 There is no server, account system, analytics, telemetry, crash reporting or third-party script. The app is static files on GitHub Pages.
 
@@ -25,8 +26,9 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
    - **The model's provider** runs it. Free models are often served by providers that may keep or train on prompts, which is why OpenRouter makes free models a separate opt-in in its privacy settings. **Private mode** (Settings) adds `provider.data_collection = "deny"`, so OpenRouter only routes to providers that don't store or train on prompts. Some free models stop working when it's on.
 2. **World revisions** (Revise tab) send the revision text, every character sheet and the world notes, then each story that mentions an affected character, in full, to the same AI provider. A story already goes there when it is written or continued, so no new party sees it, but one revision can resend many stories at once. The app shows every change before saving and applies nothing the user hasn't confirmed; edits that don't match the story's exact text are dropped.
 3. **Narration (🔊 Listen)** uses the browser's built-in speech voices. Most run on the device and send nothing. Some are cloud voices (for example Edge's "Online (Natural)" voices or Chrome's "Google" voices): those send the story text to Microsoft or Google to be spoken. The voice picker marks them "online", and **Private mode** hides them and never uses them. No new code or network address was added to the app for this; it is the browser's own speech feature.
-4. **Loading the app** from GitHub Pages. GitHub sees the visitor's IP address like any web host. No story data is involved.
-5. Nothing else. The Content Security Policy blocks scripts from anywhere but the app itself.
+4. **Premium voices (opt-in)**: when the user pastes a Venice API key under Settings → Narration, each story they tap Listen on is sent, in full, to `api.venice.ai` to be turned into speech. Venice says it does not store prompts. The key is stored like the AI key (sealed by App lock, never written into backups, never taken from an imported backup). The returned audio is cached in IndexedDB so replays are free; that cache is **not encrypted**, so while App lock is on it is kept in memory only. Erase everything deletes it.
+5. **Loading the app** from GitHub Pages. GitHub sees the visitor's IP address like any web host. No story data is involved.
+6. Nothing else. The Content Security Policy blocks scripts from anywhere but the app itself.
 
 ## Protections in place
 

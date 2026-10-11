@@ -17,6 +17,9 @@
         ageOk: false,
         voice: '',
         rate: 1,
+        ttsKey: '', // optional Venice key for paid, more natural voices
+        ttsModel: 'tts-inworld-1-5-max',
+        ttsNarrator: '',
       },
       characters: [],
       stories: [],
@@ -396,6 +399,28 @@
   const MALE_VOICE = /\bmale|alex|daniel|fred|\btom\b|aaron|arthur|oliver|gordon|rishi|evan|nathan|\bguy\b|ryan|christopher|eric|roger|steffan|brian|andrew|davis|david|mark|george|james|william|thomas|reed|rocko|eddy|jorge|diego|luca|matthew|joey|justin|kevin|liam|noah|tony|jason|ethan|elliot/i;
   const voiceGender = (name) => (FEMALE_VOICE.test(name) ? 'f' : MALE_VOICE.test(name) ? 'm' : null);
 
+  // Paid narration through Venice: one key, several voice engines. Voices are split by gender so characters get a fitting one.
+  const PREMIUM_VOICES = {
+    'tts-inworld-1-5-max': { label: 'Inworld (most natural, about 11¢ a story)', f: ['Olivia', 'Sarah', 'Ashley', 'Elizabeth', 'Luna', 'Priya', 'Pixie'], m: ['Theodore', 'Edward', 'Craig', 'Mark', 'Ronald', 'Alex', 'Hades'] },
+    'tts-kokoro': { label: 'Kokoro (cheapest, about 3¢ a story)', f: ['af_heart', 'af_bella', 'af_nicole', 'af_sarah', 'af_nova', 'bf_emma', 'bf_alice', 'bf_lily', 'af_sky', 'af_jessica', 'af_river', 'af_kore'], m: ['am_michael', 'am_adam', 'am_liam', 'am_eric', 'bm_george', 'bm_daniel', 'bm_lewis', 'bm_fable', 'am_onyx', 'am_echo', 'am_fenrir', 'am_puck'] },
+  };
+  const premiumVoices = (model) => PREMIUM_VOICES[model] || PREMIUM_VOICES['tts-inworld-1-5-max'];
+  // The voice for the `index`th character of this gender: never the narrator's, cycling when there are more characters than voices.
+  function premiumVoice(model, gender, index, narrator) {
+    const v = premiumVoices(model);
+    const list = (gender ? v[gender] : [...v.f, ...v.m]).filter((x) => x !== narrator);
+    return list[Math.max(0, index) % list.length];
+  }
+  // Joins neighbouring lines that share a voice, then cuts them to the API's size limit, so a story takes few requests.
+  function voiceRuns(lines, max = 3000) {
+    const runs = [];
+    for (const l of lines) {
+      const last = runs[runs.length - 1];
+      if (last && last.voice === l.voice) last.text += ' ' + l.text; else runs.push({ voice: l.voice, text: l.text });
+    }
+    return runs.flatMap((r) => speechChunks(r.text, max).map((text) => ({ voice: r.voice, text })));
+  }
+
   // OpenRouter can answer 200 with {"error": ...} instead of choices when the model's provider fails or is busy.
   function providerError(d) {
     const e = d && d.error;
@@ -470,7 +495,7 @@
   const unseal = decryptWith;
 
   const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
-    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, characterGender, voiceGender, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
+    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

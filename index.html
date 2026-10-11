@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14111f">
 <!-- Only this site's own code runs; AI calls may go to any https endpoint (or a local server) the user sets. See SECURITY.md. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; media-src 'self' blob: data:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -44,6 +44,7 @@
   .chip { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 999px; padding: 7px 14px; font: 0.95rem system-ui, sans-serif; cursor: pointer; }
   .chip.on { border-color: var(--accent); background: #3a2b55; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 10px 0; cursor: pointer; }
+  h3 { font-size: 1rem; margin: 18px 0 6px; }
   .card h3 { margin: 0 0 4px; font-size: 1.05rem; }
     a { color: var(--accent); }
   summary { cursor: pointer; color: var(--muted); font: 0.95rem system-ui, sans-serif; margin-top: 18px; }

@@ -217,3 +217,12 @@ test('dialogue is voiced by the character named nearest the quote', () => {
   assert.strictEqual(A.voiceGender('Samantha'), 'f');
   assert.strictEqual(A.voiceGender('Evan (Enhanced)'), 'm');
 });
+
+test('premium narration picks fitting voices and batches lines by voice', () => {
+  assert.strictEqual(A.premiumVoice('tts-inworld-1-5-max', 'f', 0, 'Olivia'), 'Sarah');
+  assert.strictEqual(A.premiumVoice('tts-inworld-1-5-max', 'm', 7, ''), 'Theodore');
+  assert.ok(A.premiumVoices('gone-model').f.length);
+  const runs = A.voiceRuns([{ voice: 'n', text: 'A.' }, { voice: 'n', text: 'B.' }, { voice: 'x', text: '"Hi."' }, { voice: 'n', text: 'C.' }]);
+  assert.deepStrictEqual(runs, [{ voice: 'n', text: 'A. B.' }, { voice: 'x', text: '"Hi."' }, { voice: 'n', text: 'C.' }]);
+  assert.ok(A.voiceRuns([{ voice: 'n', text: 'Word. '.repeat(1000) }], 3000).every((r) => r.text.length <= 3000));
+});
