@@ -250,7 +250,7 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null, reviseText: '', revision: null };
+const ui = { locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null, reviseText: '', revision: null, reviseLog: [] };
 const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['revise', '🪄', 'Revise'], ['settings', '⚙️', 'Settings']];
 
 function go(view, param = null) { ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
@@ -314,23 +314,55 @@ async function quickstart(vibe) {
 }
 
 // World revision: ask for the sheet changes, then exact-text edits for each story the change touches. Nothing is saved until Apply.
+// Stories of characters named in the change start right away, alongside the sheet update, a few at a time. Every step shows in ui.reviseLog.
 async function planRevision(revision) {
   if (!revision || ui.busy) return;
-  ui.busy = true; render(); setStatus('Reading your cast and world…');
-  try {
-    const plan = Object.assign(A.sheetChanges(state, await chatJson(A.buildReviseSheetMessages(state, revision))), { revision, stories: [], failed: [] });
-    const targets = A.storiesForRevision(state, plan.affected);
-    for (const [i, s] of targets.entries()) {
-      setStatus(`Checking story ${i + 1} of ${targets.length}: ${s.title}…`);
-      try {
-        const r = await chatJson(A.buildReviseStoryMessages(s, revision));
-        const { text, applied } = A.applyEdits(s.text, r.edits);
-        const summary = typeof r.summary === 'string' && r.summary.trim() !== (s.summary || '') ? r.summary.trim() : '';
-        if (applied.length || summary) plan.stories.push({ id: s.id, text, summary, edits: applied });
-      } catch (e) { plan.failed.push(s.title); }
+  ui.busy = true; ui.status = '';
+  const log = ui.reviseLog = [];
+  const note = (label, state = 'ok', text = '') => { const e = { label, state, note: text }; log.push(e); render(); return e; };
+  const set = (e, state, text) => { e.state = state; e.note = text; render(); };
+  const plan = { revision, characters: [], world: {}, affected: [], stories: [], failed: [] };
+  const queue = [], queued = new Set();
+  const enqueue = (stories) => { for (const s of stories) if (!queued.has(s.id)) { queued.add(s.id); queue.push({ s, e: note(`Story: ${s.title}`, 'wait') }); } };
+  const check = async ({ s, e }) => {
+    set(e, 'run', '');
+    try {
+      const r = await chatJson(A.buildReviseStoryMessages(s, revision));
+      const { text, applied } = A.applyEdits(s.text, r.edits);
+      const summary = typeof r.summary === 'string' && r.summary.trim() !== (s.summary || '') ? r.summary.trim() : '';
+      const missed = (Array.isArray(r.edits) ? r.edits.length : 0) - applied.length;
+      if (applied.length || summary) plan.stories.push({ id: s.id, text, summary, edits: applied });
+      set(e, 'ok', [applied.length ? `${applied.length} passage${applied.length > 1 ? 's' : ''} to fix` : 'nothing contradicts the change',
+        summary && 'summary updated', missed > 0 && `${missed} suggested edit${missed > 1 ? 's' : ''} didn't match the text, skipped`].filter(Boolean).join(', '));
+    } catch (err) { plan.failed.push(s.title); set(e, 'fail', err.message); }
+  };
+  let sheetsDone = false;
+  const worker = async () => {
+    while (queue.length || !sheetsDone) {
+      if (queue.length) await check(queue.shift());
+      else await new Promise((r) => setTimeout(r, 200));
     }
-    ui.revision = plan; ui.status = '';
-  } catch (e) { ui.status = e.message; }
+  };
+  const sheet = note('Character sheets and world notes', 'run');
+  const named = A.charactersNamedIn(state, revision);
+  if (named.length) {
+    note(`The change names ${named.map((c) => c.name).join(', ')}, so their stories are checked while the sheets update`);
+    enqueue(A.storiesForRevision(state, named.map((c) => c.name)));
+  }
+  // ponytail: 3 at a time keeps free models under their per-minute limit; raise it for paid models if it's still slow.
+  const workers = [worker(), worker(), worker()];
+  try {
+    Object.assign(plan, A.sheetChanges(state, await chatJson(A.buildReviseSheetMessages(state, revision))));
+    const changed = plan.characters.map((pc) => `${pc.name} (${Object.keys(pc.set).join(', ')})`).concat(Object.keys(plan.world).map((k) => `world ${k}`));
+    set(sheet, 'ok', changed.length ? 'changing ' + changed.join('; ') : 'nothing to change');
+    const who = A.charactersNamedIn(state, plan.affected.join(' ')).map((c) => c.name);
+    const targets = A.storiesForRevision(state, plan.affected);
+    note(who.length ? `Checking the ${targets.length} of ${state.stories.length} stories that feature or mention ${who.join(', ')}` : `The change isn't about one character, so all ${state.stories.length} stories are checked`);
+    enqueue(targets);
+  } catch (err) { set(sheet, 'fail', err.message); ui.status = err.message; queue.length = 0; }
+  sheetsDone = true;
+  await Promise.all(workers);
+  if (sheet.state === 'ok') ui.revision = plan;
   finish();
 }
 
@@ -475,7 +507,8 @@ const VIEWS = {
     if (!plan) {
       const box = h('textarea', { placeholder: 'e.g. "Ana has always had red hair, not black" or "The castle burned down last winter"', oninput: (e) => { ui.reviseText = e.target.value; } });
       box.value = ui.reviseText;
-      nodes.push(box, h('div', { class: 'row' }, h('button', { class: 'btn', disabled: ui.busy, onclick: () => planRevision(ui.reviseText.trim()) }, '🔍 Preview changes')));
+      nodes.push(box, h('div', { class: 'row' }, h('button', { class: 'btn', disabled: ui.busy, onclick: () => planRevision(ui.reviseText.trim()) }, ui.busy ? 'Checking…' : '🔍 Preview changes')));
+      if (ui.busy || ui.reviseLog.length) nodes.push(reviseLog(true));
     } else {
       const diff = (label, from, to) => h('div', { class: 'card setup' }, h('h3', {}, label),
         h('p', { class: 'old' }, Array.isArray(from) ? from.join('\n') : from || '(empty)'), h('p', { class: 'new' }, Array.isArray(to) ? to.join('\n') : to));
@@ -488,6 +521,7 @@ const VIEWS = {
         Object.entries(plan.world).map(([k, v]) => diff(`World: ${k}`, state.world[k], v)),
         plan.stories.map((ps) => [ps.edits.map((e) => diff(`Story: ${story(ps.id).title}`, e.find, e.replace)),
           ps.summary && diff(`Story: ${story(ps.id).title} (summary)`, story(ps.id).summary, ps.summary)]),
+        reviseLog(false),
         plan.failed.length > 0 && h('p', { class: 'muted' }, `Could not check: ${plan.failed.join(', ')}. Those stories stay as they are.`),
         h('div', { class: 'row' },
           count > 0 && h('button', { class: 'btn', onclick: async () => { A.applyRevision(state, plan); ui.revision = null; ui.reviseText = ''; await save(); ui.status = 'Revision applied.'; render(); } }, `Apply ${count} change${count > 1 ? 's' : ''}`),
@@ -615,6 +649,14 @@ function narrationSettings() {
       : 'Far more natural voices through Venice, which allows adult stories. Make an API key at venice.ai (Settings → API, add a few dollars of credit) and paste it here. A medium story costs about 11¢ (or 3¢ with the cheaper engine); replaying it is free.'),
     h('p', { class: 'muted' }, 'With premium voices on, the story text is sent to Venice to be spoken.'),
     ...field('Venice API key', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Venice key', value: s.ttsKey, onchange: set('ttsKey') }))];
+}
+
+// What a revision checked: live while it runs, folded away under the preview afterwards.
+function reviseLog(open) {
+  const icon = { wait: '○', run: '⏳', ok: '✓', fail: '✗' };
+  const n = ui.reviseLog.filter((e) => e.state === 'ok' || e.state === 'fail').length;
+  return h('details', { open, class: 'log' }, h('summary', {}, ui.busy ? `Checking… (${n} of ${ui.reviseLog.length} done)` : 'What was checked'),
+    h('ul', { class: 'dev' }, ui.reviseLog.map((e) => h('li', { class: e.state }, `${icon[e.state]} ${e.label}`, e.note && h('span', { class: 'muted' }, ` · ${e.note}`)))));
 }
 
 function storyReader(story) {

@@ -226,3 +226,9 @@ test('premium narration picks fitting voices and batches lines by voice', () => 
   assert.deepStrictEqual(runs, [{ voice: 'n', text: 'A. B.' }, { voice: 'x', text: '"Hi."' }, { voice: 'n', text: 'C.' }]);
   assert.ok(A.voiceRuns([{ voice: 'n', text: 'Word. '.repeat(1000) }], 3000).every((r) => r.text.length <= 3000));
 });
+
+test('charactersNamedIn finds characters by first name, ignoring partial words', () => {
+  const s = seeded();
+  assert.deepEqual(A.charactersNamedIn(s, 'mira is left-handed').map((c) => c.id), ['a']);
+  assert.deepEqual(A.charactersNamedIn(s, 'Miranda and Torent'), []);
+});
