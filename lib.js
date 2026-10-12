@@ -15,6 +15,11 @@
         mature: true,
         privateOnly: false,
         ageOk: false,
+        voice: '',
+        rate: 1,
+        ttsKey: '', // optional Venice key for paid, more natural voices
+        ttsModel: 'tts-inworld-1-5-max',
+        ttsNarrator: '',
       },
       characters: [],
       stories: [],
@@ -337,6 +342,85 @@
     return rec;
   }
 
+  // Narration: browsers (Chrome especially) cut off long utterances, so speak sentence-sized pieces of at most `max` chars.
+  function speechChunks(text, max = 200) {
+    const out = [];
+    let para = true; // a new paragraph always starts a new piece, so the voice pauses there
+    for (const sentence of (text || '').match(/[^.!?\n]+[.!?]*["'”’)]*|\n+/g) || []) {
+      let rest = sentence.trim();
+      while (rest.length > max) {
+        const cut = rest.lastIndexOf(' ', max) > 0 ? rest.lastIndexOf(' ', max) : max;
+        out.push(rest.slice(0, cut)); rest = rest.slice(cut).trim();
+      }
+      if (!rest) { para = true; continue; }
+      if (!para && out[out.length - 1].length + rest.length + 1 <= max) out[out.length - 1] += ' ' + rest;
+      else out.push(rest);
+      para = false;
+    }
+    return out;
+  }
+
+  // Splits a story into narration and quoted dialogue. Each quote's speaker is the character named closest to it in the same paragraph.
+  // ponytail: name-proximity guess ("she said" lines with no name nearby go to the narrator); ask the AI to tag speakers if it misfires a lot.
+  function speechParts(text, characters = []) {
+    const names = characters.flatMap((c) => (c.name || '').split(/\s+/).filter((n) => n.length > 1)
+      .map((n) => [new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), c.id]));
+    const nearest = (str, fromEnd) => {
+      let best = null, dist = Infinity;
+      for (const [re, id] of names) for (const m of str.matchAll(re)) {
+        const d = fromEnd ? str.length - m.index - m[0].length : m.index;
+        if (d < dist) { dist = d; best = id; }
+      }
+      return [best, dist];
+    };
+    const parts = [];
+    for (const para of (text || '').split(/\n\s*\n/)) {
+      const pieces = para.split(/("[^"\n]+"|“[^”\n]+”)/); // odd indexes are the quotes
+      pieces.forEach((p, i) => {
+        if (!p.trim()) return;
+        let id = null;
+        if (i % 2) {
+          const [after, da] = nearest(pieces[i + 1] || '', false), [before, db] = nearest(pieces[i - 1] || '', true);
+          id = da <= db ? after : before;
+        }
+        parts.push({ text: p.trim(), id });
+      });
+    }
+    return parts;
+  }
+  // Guesses from the pronouns in a character's sheet: 'f', 'm' or null.
+  function characterGender(c) {
+    const t = [c.appearance, c.personality, c.background, ...(c.developments || [])].join(' ').toLowerCase();
+    const f = (t.match(/\b(she|her|hers|herself)\b/g) || []).length, m = (t.match(/\b(he|him|his|himself)\b/g) || []).length;
+    return f > m ? 'f' : m > f ? 'm' : null;
+  }
+  // Browsers don't say a voice's gender, so go by the names the common Apple, Microsoft and Google voices use.
+  const FEMALE_VOICE = /female|samantha|\bava\b|allison|susan|victoria|karen|moira|tessa|fiona|serena|kate|zoe|nicky|joelle|aria|jenny|michelle|emma|sonia|libby|natasha|clara|zira|hazel|heera|catherine|veena|amelie|anna|alice|ellen|sara|paulina|monica|luciana|kyoko|\bana\b|salli|joanna|kendra|ivy|ruth|elizabeth|ashley|cora|jane|nancy|maisie|isla|molly/i;
+  const MALE_VOICE = /\bmale|alex|daniel|fred|\btom\b|aaron|arthur|oliver|gordon|rishi|evan|nathan|\bguy\b|ryan|christopher|eric|roger|steffan|brian|andrew|davis|david|mark|george|james|william|thomas|reed|rocko|eddy|jorge|diego|luca|matthew|joey|justin|kevin|liam|noah|tony|jason|ethan|elliot/i;
+  const voiceGender = (name) => (FEMALE_VOICE.test(name) ? 'f' : MALE_VOICE.test(name) ? 'm' : null);
+
+  // Paid narration through Venice: one key, several voice engines. Voices are split by gender so characters get a fitting one.
+  const PREMIUM_VOICES = {
+    'tts-inworld-1-5-max': { label: 'Inworld (most natural, about 11¢ a story)', f: ['Olivia', 'Sarah', 'Ashley', 'Elizabeth', 'Luna', 'Priya', 'Pixie'], m: ['Theodore', 'Edward', 'Craig', 'Mark', 'Ronald', 'Alex', 'Hades'] },
+    'tts-kokoro': { label: 'Kokoro (cheapest, about 3¢ a story)', f: ['af_heart', 'af_bella', 'af_nicole', 'af_sarah', 'af_nova', 'bf_emma', 'bf_alice', 'bf_lily', 'af_sky', 'af_jessica', 'af_river', 'af_kore'], m: ['am_michael', 'am_adam', 'am_liam', 'am_eric', 'bm_george', 'bm_daniel', 'bm_lewis', 'bm_fable', 'am_onyx', 'am_echo', 'am_fenrir', 'am_puck'] },
+  };
+  const premiumVoices = (model) => PREMIUM_VOICES[model] || PREMIUM_VOICES['tts-inworld-1-5-max'];
+  // The voice for the `index`th character of this gender: never the narrator's, cycling when there are more characters than voices.
+  function premiumVoice(model, gender, index, narrator) {
+    const v = premiumVoices(model);
+    const list = (gender ? v[gender] : [...v.f, ...v.m]).filter((x) => x !== narrator);
+    return list[Math.max(0, index) % list.length];
+  }
+  // Joins neighbouring lines that share a voice, then cuts them to the API's size limit, so a story takes few requests.
+  function voiceRuns(lines, max = 3000) {
+    const runs = [];
+    for (const l of lines) {
+      const last = runs[runs.length - 1];
+      if (last && last.voice === l.voice) last.text += ' ' + l.text; else runs.push({ voice: l.voice, text: l.text });
+    }
+    return runs.flatMap((r) => speechChunks(r.text, max).map((text) => ({ voice: r.voice, text })));
+  }
+
   // OpenRouter can answer 200 with {"error": ...} instead of choices when the model's provider fails or is busy.
   function providerError(d) {
     const e = d && d.error;
@@ -411,7 +495,7 @@
   const unseal = decryptWith;
 
   const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
-    buildReviseSheetMessages, buildReviseStoryMessages, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
+    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

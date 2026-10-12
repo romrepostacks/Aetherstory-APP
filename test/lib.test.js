@@ -193,3 +193,36 @@ test('provider errors sent instead of a reply become readable, retryable errors'
   assert.throws(() => A.replyText({}), /empty reply/);
   assert.match(A.parseSSE('data: {"error":{"code":502,"message":"Provider down"}}\n').error.message, /Provider down/);
 });
+
+test('narration splits text into short, complete pieces that keep every word', () => {
+  const text = 'She ran. "Wait!" he called?\n\nThe rain ' + 'fell and fell '.repeat(30) + 'until dawn.';
+  const parts = A.speechChunks(text, 60);
+  assert.ok(parts.every((p) => p.length <= 60 && p.trim() === p && p));
+  assert.strictEqual(parts.join(' ').split(/\s+/).join(' '), text.split(/\s+/).join(' '));
+  assert.strictEqual(parts[0], 'She ran. "Wait!" he called?');
+  assert.match(parts[1], /^The rain/);
+  assert.deepStrictEqual(A.speechChunks(''), []);
+});
+
+test('dialogue is voiced by the character named nearest the quote', () => {
+  const cast = [{ id: 'a', name: 'Mira Vale' }, { id: 'b', name: 'Toren' }];
+  const parts = A.speechParts('The rain fell.\n\n"Run," Mira said. "Now!"\n\nToren froze. “Why?”\n\n"Because," she whispered.', cast);
+  assert.deepStrictEqual(parts.map((p) => [p.text, p.id]), [
+    ['The rain fell.', null], ['"Run,"', 'a'], ['Mira said.', null], ['"Now!"', 'a'],
+    ['Toren froze.', null], ['“Why?”', 'b'], ['"Because,"', null], ['she whispered.', null]]);
+  assert.strictEqual(A.characterGender({ personality: 'She is bold; her ship is her life.' }), 'f');
+  assert.strictEqual(A.characterGender({ background: 'He lost his brother.' }), 'm');
+  assert.strictEqual(A.voiceGender('Microsoft Aria Online (Natural)'), 'f');
+  assert.strictEqual(A.voiceGender('Google UK English Male'), 'm');
+  assert.strictEqual(A.voiceGender('Samantha'), 'f');
+  assert.strictEqual(A.voiceGender('Evan (Enhanced)'), 'm');
+});
+
+test('premium narration picks fitting voices and batches lines by voice', () => {
+  assert.strictEqual(A.premiumVoice('tts-inworld-1-5-max', 'f', 0, 'Olivia'), 'Sarah');
+  assert.strictEqual(A.premiumVoice('tts-inworld-1-5-max', 'm', 7, ''), 'Theodore');
+  assert.ok(A.premiumVoices('gone-model').f.length);
+  const runs = A.voiceRuns([{ voice: 'n', text: 'A.' }, { voice: 'n', text: 'B.' }, { voice: 'x', text: '"Hi."' }, { voice: 'n', text: 'C.' }]);
+  assert.deepStrictEqual(runs, [{ voice: 'n', text: 'A. B.' }, { voice: 'x', text: '"Hi."' }, { voice: 'n', text: 'C.' }]);
+  assert.ok(A.voiceRuns([{ voice: 'n', text: 'Word. '.repeat(1000) }], 3000).every((r) => r.text.length <= 3000));
+});

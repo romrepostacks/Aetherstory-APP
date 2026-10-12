@@ -108,6 +108,130 @@ async function chatJson(messages) {
   return A.parseJsonLoose(await chat(messages, { stream: false }));
 }
 
+// ---------- narration: the browser's own voices, free with no setup ----------
+const canSpeak = 'speechSynthesis' in window;
+// Private mode keeps to voices that run on the device; some browser voices (e.g. Edge "Online", Google) send the text to their maker.
+const voices = () => (canSpeak ? speechSynthesis.getVoices() : []).filter((v) => v.localService || !state.settings.privateOnly);
+const NATURAL = /natural|neural|premium|enhanced/i;
+// Voices in the reader's language, most natural-sounding first.
+function langVoices() {
+  const all = voices(), lang = (navigator.language || 'en').slice(0, 2);
+  const mine = all.filter((v) => v.lang.startsWith(lang));
+  return (mine.length ? mine : all).sort((a, b) => NATURAL.test(b.name) - NATURAL.test(a.name));
+}
+function pickVoice() {
+  const all = langVoices();
+  return voices().find((v) => v.voiceURI === state.settings.voice) || all.find((v) => NATURAL.test(v.name)) || all.find((v) => v.default) || all[0];
+}
+// A character's own voice, or one picked to match them: same gender, not the narrator's, and different from the other characters' where there are enough voices.
+function characterVoice(c) {
+  const chosen = voices().find((v) => v.voiceURI === c.voice);
+  if (chosen) return { voice: chosen, pitch: 1 };
+  const narrator = pickVoice(), g = A.characterGender(c);
+  const pool = langVoices().filter((v) => v !== narrator && (!g || A.voiceGender(v.name) === g));
+  const peers = state.characters.filter((x) => !x.voice && A.characterGender(x) === g);
+  if (pool.length) return { voice: pool[Math.max(0, peers.findIndex((x) => x.id === c.id)) % pool.length], pitch: 1 };
+  // Only the narrator's voice fits: shift its pitch so the character still sounds different.
+  return { voice: narrator, pitch: g === 'm' ? 0.8 : 1.2 };
+}
+// The story as spoken lines: narration by the narrator (or the point-of-view character, for first person), dialogue by each speaker.
+function storyLines(story) {
+  const cast = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
+  const byId = (id) => state.characters.find((c) => c.id === id);
+  return [{ text: story.title + '.', id: null }, ...A.speechParts(story.text, cast.length ? cast : state.characters)]
+    .map((p) => ({ text: p.text, who: byId(p.id || story.pov) }));
+}
+let speaking = null; // { id, stop } of what is being read aloud
+const listenLabel = (id) => (speaking && speaking.id === id ? '⏹ Stop' : '🔊 Listen');
+const refreshListen = (id) => { const b = document.getElementById('listen'); if (b) b.textContent = listenLabel(id); };
+// Starts reading [{ text, who }] aloud, or stops if this same thing is already playing.
+function speak(id, lines) {
+  const prev = speaking;
+  if (prev && prev.stop) prev.stop();
+  if (canSpeak) speechSynthesis.cancel();
+  const me = speaking = prev && prev.id === id ? null : { id };
+  refreshListen(id);
+  if (me) (state.settings.ttsKey ? narratePremium : narrate)(me, lines);
+}
+const done = (me) => { if (speaking !== me) return; speaking = null; refreshListen(me.id); };
+// Free: the browser's own voices.
+function narrate(me, lines) {
+  const utts = lines.flatMap((l) => {
+    const v = l.who ? characterVoice(l.who) : { voice: pickVoice(), pitch: 1 };
+    return A.speechChunks(l.text).map((t) => {
+      const u = new SpeechSynthesisUtterance(t);
+      if (v.voice) { u.voice = v.voice; u.lang = v.voice.lang; }
+      u.pitch = v.pitch;
+      u.rate = Number(state.settings.rate) || 1;
+      return u;
+    });
+  });
+  // cancel() fires end/error on the old queue too, so only the current reading resets the button.
+  const last = utts[utts.length - 1];
+  if (last) last.onend = last.onerror = () => done(me);
+  utts.forEach((u) => speechSynthesis.speak(u));
+}
+
+// Paid: Venice voices with the user's own key.
+const premiumNarrator = () => { const v = A.premiumVoices(state.settings.ttsModel); return [...v.f, ...v.m].includes(state.settings.ttsNarrator) ? state.settings.ttsNarrator : v.f[0]; };
+function premiumCharacterVoice(c) {
+  const s = state.settings, v = A.premiumVoices(s.ttsModel);
+  if ([...v.f, ...v.m].includes(c.ttsVoice)) return c.ttsVoice;
+  const g = A.characterGender(c), peers = state.characters.filter((x) => A.characterGender(x) === g);
+  return A.premiumVoice(s.ttsModel, g, peers.findIndex((x) => x.id === c.id), premiumNarrator());
+}
+// Audio already paid for is kept: in memory always, and on the device unless App lock is on (the cache isn't encrypted).
+// ponytail: no eviction; Erase everything clears it. Add a size cap if phones run short on space.
+const audioCache = new Map();
+async function premiumAudio(model, voice, text) {
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${model}|${voice}|${text}`))), (b) => b.toString(16).padStart(2, '0')).join('');
+  const key = 'tts:' + hash;
+  let blob = audioCache.get(key) || (!lockKey && await kv(key).catch(() => null));
+  if (!blob) {
+    let res;
+    try {
+      res = await fetch('https://api.venice.ai/api/v1/audio/speech', { method: 'POST',
+        headers: { Authorization: 'Bearer ' + state.settings.ttsKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, voice, input: text, response_format: 'mp3' }) });
+    } catch (e) { throw new Error('Could not reach Venice for premium voices. Check your connection.'); }
+    if (!res.ok) throw new Error(`Premium voice request failed (${res.status}): ${(await res.text()).slice(0, 200)}${res.status === 401 ? '\nCheck your Venice API key in Settings → Narration.' : ''}`);
+    blob = await res.blob();
+    if (!lockKey) kv(key, blob).catch(() => {});
+  }
+  audioCache.set(key, blob);
+  return blob;
+}
+const player = new Audio();
+const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+async function narratePremium(me, lines) {
+  // Phones only let audio start from a tap: play a silent clip now so the real audio may follow once it has downloaded.
+  player.src = SILENT; player.play().catch(() => {});
+  const model = state.settings.ttsModel;
+  const runs = A.voiceRuns(lines.map((l) => ({ text: l.text, voice: l.who ? premiumCharacterVoice(l.who) : premiumNarrator() })));
+  const pending = [];
+  const fetchRun = (i) => pending[i] || (pending[i] = premiumAudio(model, runs[i].voice, runs[i].text));
+  try {
+    for (let i = 0; i < runs.length && speaking === me; i++) {
+      const blob = await fetchRun(i);
+      if (runs[i + 1]) fetchRun(i + 1).catch(() => {}); // download the next part while this one plays
+      if (speaking !== me) break;
+      const url = URL.createObjectURL(blob);
+      player.src = url;
+      player.playbackRate = Number(state.settings.rate) || 1;
+      await new Promise((res, rej) => {
+        me.stop = () => { player.pause(); res(); };
+        player.onended = res;
+        player.onerror = () => rej(new Error('This device could not play the premium audio.'));
+        player.play().catch(rej);
+      });
+      URL.revokeObjectURL(url);
+    }
+  } catch (e) { if (speaking === me) alert(e.message); }
+  done(me);
+}
+const listenBtn = (story) => (canSpeak || state.settings.ttsKey) && h('button', { class: 'btn ghost', id: 'listen', onclick: () => speak(story.id, storyLines(story)) }, listenLabel(story.id));
+const voiceOptions = (selected) => voices().map((v) => h('option', { value: v.voiceURI, selected: v.voiceURI === selected }, `${v.name} (${v.lang})${v.localService ? '' : ' · online'}`));
+
 // ---------- tiny DOM helper ----------
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -300,6 +424,7 @@ const VIEWS = {
       nodes.push(h('h2', {}, story.title), h('div', { class: 'prose', id: 'output' }, story.text));
       if (!ui.busy) nodes.push(h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: () => generate(story.id) }, 'Continue story'),
+        listenBtn(story),
         h('button', { class: 'btn ghost', onclick: () => { ui.currentId = null; ui.premise = ''; ui.status = ''; render(); } }, 'New story')),
         h('p', { class: 'muted' }, 'Continue uses the Premise box above as direction for the next part, if you fill it in.'));
     } else if (ui.busy) nodes.push(h('div', { class: 'prose', id: 'output' }));
@@ -395,7 +520,7 @@ const VIEWS = {
       const data = A.normalizeState(raw);
       if (!confirm(`Replace your library with this backup (${data.stories.length} stories, ${data.characters.length} characters)?`)) return;
       // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
-      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly']) data.settings[k] = s[k];
+      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey']) data.settings[k] = s[k];
       data.settings.ageOk = true;
       state = data; ui.pendingImport = null; await save(); render();
     };
@@ -415,7 +540,7 @@ const VIEWS = {
     };
     const exportLib = async () => {
       const data = JSON.parse(JSON.stringify(state));
-      data.settings.apiKey = '';
+      data.settings.apiKey = ''; data.settings.ttsKey = '';
       download(JSON.stringify(await A.encryptBackup(data, await deviceKey())), `aetherstory-${new Date().toISOString().slice(0, 10)}.json`);
     };
     // A backup from another device: ask for that device's key file (or the pasted key).
@@ -452,6 +577,7 @@ const VIEWS = {
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
       h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
       ...field('Instructions applied to every story', style),
+      narrationSettings(),
       h('h2', {}, 'App lock'),
       lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
         h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => location.reload() }, 'Lock now'),
@@ -467,16 +593,41 @@ const VIEWS = {
   },
 };
 
+function narrationSettings() {
+  const s = state.settings;
+  const set = (k) => (e) => { s[k] = e.target.value.trim(); save(); render(); };
+  const free = canSpeak && !s.ttsKey && [
+    ...field('Narrator voice', h('select', { onchange: (e) => { s.voice = e.target.value; save(); } },
+      h('option', { value: '' }, `Automatic${pickVoice() ? ` (${pickVoice().name})` : ''}`), voiceOptions(s.voice))),
+    h('p', { class: 'muted' }, 'Voices marked "online" send the story text to your browser\'s maker to be spoken; Private mode hides them. For the most natural free voices: on iPhone go to Settings → Accessibility → Read & Speak → Voices → English and download a few "Premium" or "Enhanced" voices (e.g. Ava, Zoe, Evan, Nathan), then reopen this app. On a PC, open the app in Microsoft Edge for its "Natural" voices.')];
+  const v = A.premiumVoices(s.ttsModel);
+  const paid = s.ttsKey && [
+    ...field('Voice engine', h('select', { onchange: set('ttsModel') }, Object.entries(A.PREMIUM_VOICES).map(([id, m]) => h('option', { value: id, selected: s.ttsModel === id }, m.label)))),
+    ...field('Narrator voice', h('select', { onchange: set('ttsNarrator') }, [...v.f, ...v.m].map((x) => h('option', { value: x, selected: x === premiumNarrator() }, `${x} (${v.f.includes(x) ? 'female' : 'male'})`))))];
+  return [h('h2', {}, 'Narration'),
+    h('p', { class: 'muted' }, 'Tap 🔊 Listen on any story to hear it read aloud. Each character speaks their lines in their own voice, picked to match them; change it on their page in the Cast tab.'),
+    free, paid,
+    ...field('Speed', h('select', { onchange: (e) => { s.rate = Number(e.target.value); save(); } },
+      [[0.8, 'Slow'], [1, 'Normal'], [1.2, 'Fast'], [1.5, 'Faster']].map(([r, l]) => h('option', { value: r, selected: Number(s.rate) === r }, l)))),
+    h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: () => speak('preview', [{ text: 'Once upon a time, in a world of your own making, a story began.' }]) }, listenLabel('preview'))),
+    h('h3', {}, 'Premium voices (optional, paid)'),
+    h('p', { class: 'muted' }, s.ttsKey ? '✓ On. Stories are read by Venice voices. Replaying a story is free: its audio is saved on this device (except while App lock is on). Remove the key to go back to the free voices.'
+      : 'Far more natural voices through Venice, which allows adult stories. Make an API key at venice.ai (Settings → API, add a few dollars of credit) and paste it here. A medium story costs about 11¢ (or 3¢ with the cheaper engine); replaying it is free.'),
+    h('p', { class: 'muted' }, 'With premium voices on, the story text is sent to Venice to be spoken.'),
+    ...field('Venice API key', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Venice key', value: s.ttsKey, onchange: set('ttsKey') }))];
+}
+
 function storyReader(story) {
   if (!story) return VIEWS.stories();
   return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('stories') }, '← All stories')),
     h('h2', {}, story.title),
     h('p', { class: 'muted' }, [fmtDate(story.createdAt), (story.characterIds || []).map(charName).filter(Boolean).join(', ')].filter(Boolean).join(' · ')),
     story.summary && h('p', { class: 'muted' }, story.summary),
+    canSpeak && h('div', { class: 'row' }, listenBtn(story)),
     h('div', { class: 'prose' }, story.text),
     h('div', { class: 'row' },
       h('button', { class: 'btn', disabled: ui.busy, onclick: () => { ui.premise = ''; generate(story.id); } }, 'Continue story'),
-      h('button', { class: 'btn danger', onclick: async () => { if (!confirm('Delete this story? Its effects on the world stay.')) return; state.stories = state.stories.filter((s) => s !== story); await save(); go('stories'); } }, 'Delete'))];
+      h('button', { class: 'btn danger', onclick: async () => { if (!confirm('Delete this story? Its effects on the world stay.')) return; if (speaking && speaking.id === story.id) speak(story.id); state.stories = state.stories.filter((s) => s !== story); await save(); go('stories'); } }, 'Delete'))];
 }
 
 function characterEditor(c) {
@@ -504,12 +655,19 @@ function characterEditor(c) {
     if (!c) state.characters.push(target);
     await save(); go('characters');
   };
+  // The voice picker for whichever narration is on: premium (Venice) or the browser's own.
+  const pv = A.premiumVoices(state.settings.ttsModel);
+  const voice = state.settings.ttsKey ? h('select', {}, h('option', { value: '' }, 'Automatic, matched to the character'), [...pv.f, ...pv.m].map((x) => h('option', { value: x, selected: x === draft.ttsVoice }, `${x} (${pv.f.includes(x) ? 'female' : 'male'})`)))
+    : canSpeak && h('select', {}, h('option', { value: '' }, 'Automatic, matched to the character'), voiceOptions(draft.voice));
+  if (voice) inputs[state.settings.ttsKey ? 'ttsVoice' : 'voice'] = voice;
+  const hear = () => speak('voice', [{ text: `Hi, I'm ${inputs.name.value.trim() || 'new here'}.`, who: { ...draft, ...Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value])) } }]);
   const appearsIn = c ? state.stories.filter((s) => (s.characterIds || []).includes(c.id)) : [];
   return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('characters') }, '← Cast')),
     h('h2', {}, c ? c.name : 'New character'),
     !c && [idea, h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: aiFill }, '✨ Fill in with AI'))],
     ...mk('name', 'Name'), ...mk('appearance', 'Appearance', true), ...mk('personality', 'Personality', true), ...mk('background', 'Background', true),
     ...field('Story developments (added automatically, one per line)', dev),
+    voice && [...field('Voice when stories are read aloud', voice), h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: hear }, listenLabel('voice')))],
     status,
     h('div', { class: 'row' }, h('button', { class: 'btn', onclick: saveChar }, 'Save'),
       c && h('button', { class: 'btn danger', onclick: async () => { if (!confirm(`Delete ${c.name}?`)) return; state.characters = state.characters.filter((x) => x !== c); ui.selected = ui.selected.filter((x) => x !== c.id); await save(); go('characters'); } }, 'Delete')),
@@ -556,5 +714,6 @@ async function eraseAll() {
   // Anything that slips past a try/catch still shows up instead of failing silently.
   addEventListener('unhandledrejection', (e) => setStatus('Error: ' + ((e.reason && e.reason.message) || e.reason)));
   render();
+  if (canSpeak) speechSynthesis.addEventListener('voiceschanged', () => { if (ui.view === 'settings') render(); });
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
