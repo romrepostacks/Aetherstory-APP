@@ -299,11 +299,16 @@
     return { characters, world, affected: strList(r.affected).concat(characters.map((c) => c.name)) };
   }
 
+  // Characters whose first name appears in a piece of text.
+  function charactersNamedIn(state, text) {
+    return state.characters.filter((c) => c.name && new RegExp(`\\b${c.name.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text || ''));
+  }
+
   // Stories to check: those featuring or naming an affected character, or every story when the change isn't about anyone.
   function storiesForRevision(state, affected) {
     const people = state.characters.filter((c) => affected.some((n) => n.toLowerCase() === c.name.toLowerCase()));
     if (!people.length) return state.stories.slice();
-    const named = (s, c) => new RegExp(`\\b${c.name.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(s.text || '');
+    const named = (s, c) => charactersNamedIn({ characters: [c] }, s.text).length > 0;
     return state.stories.filter((s) => people.some((c) => (s.characterIds || []).includes(c.id) || named(s, c)));
   }
 
@@ -495,7 +500,7 @@
   const unseal = decryptWith;
 
   const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
-    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
+    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
