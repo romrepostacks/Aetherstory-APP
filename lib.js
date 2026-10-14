@@ -23,10 +23,15 @@
       },
       characters: [],
       stories: [],
-      world: { name: 'My World', overview: '', lore: [], places: [], relationships: [], timeline: [] },
+      world: emptyWorld('main', 'My World'),
       revisions: [],
+      // Worlds not open right now, each { world, stories, revisions }, and characters not in the open world.
+      otherWorlds: [],
+      library: [],
     };
   }
+  // ai: optional per-world key and model, used instead of the ones in Settings.
+  const emptyWorld = (id, name) => ({ id, name, overview: '', lore: [], places: [], relationships: [], timeline: [], ai: { apiKey: '', model: '' } });
 
   // Models that stopped being offered under a saved id; swapped on load so old settings keep working.
   const RETIRED = { 'venice/uncensored:free': 'nvidia/nemotron-3-ultra-550b-a55b:free' };
@@ -44,7 +49,88 @@
       stories: Array.isArray(s.stories) ? s.stories : [],
       world: Object.assign(base.world, s.world),
       revisions: Array.isArray(s.revisions) ? s.revisions : [],
+      otherWorlds: (Array.isArray(s.otherWorlds) ? s.otherWorlds : []).filter((x) => x && x.world && x.world.id).map((x) => ({
+        world: Object.assign(emptyWorld(), x.world), stories: Array.isArray(x.stories) ? x.stories : [], revisions: Array.isArray(x.revisions) ? x.revisions : [] })),
+      library: Array.isArray(s.library) ? s.library : [],
     };
+  }
+
+  // ---------- worlds: the open one lives in state.world/stories/revisions/characters, so prompts only ever see that world ----------
+  // A character can be in several worlds: the sheet is shared, but what happened to them (developments) is kept per world.
+  function shelveWorld(state) {
+    const id = state.world.id;
+    for (const c of state.characters) {
+      c.worlds = [...new Set([...(c.worlds || []), id])];
+      (c.devs = c.devs || {})[id] = c.developments || [];
+    }
+    state.otherWorlds.push({ world: state.world, stories: state.stories, revisions: state.revisions });
+    state.library = state.library.concat(state.characters);
+  }
+  function openWorld(state, entry) {
+    const id = entry.world.id, here = (c) => (c.worlds || []).includes(id), all = state.library;
+    Object.assign(state, { world: entry.world, stories: entry.stories, revisions: entry.revisions });
+    state.characters = all.filter(here);
+    state.library = all.filter((c) => !here(c));
+    for (const c of state.characters) c.developments = (c.devs || {})[id] || [];
+  }
+  function switchWorld(state, id) {
+    const i = state.otherWorlds.findIndex((x) => x.world.id === id);
+    if (i < 0) return false;
+    const next = state.otherWorlds.splice(i, 1)[0];
+    shelveWorld(state);
+    openWorld(state, next);
+    return true;
+  }
+  function newWorld(state, name) {
+    shelveWorld(state);
+    openWorld(state, { world: emptyWorld(uid(), name || 'New World'), stories: [], revisions: [] });
+  }
+  // Deletes a world that isn't open, with its stories. Its characters stay in the library.
+  function deleteWorld(state, id) {
+    state.otherWorlds = state.otherWorlds.filter((x) => x.world.id !== id);
+    for (const c of state.library.concat(state.characters)) {
+      if (c.worlds) c.worlds = c.worlds.filter((w) => w !== id);
+      if (c.devs) delete c.devs[id];
+    }
+  }
+  // Brings a library character into the open world, with whatever already happened to them here.
+  function addToWorld(state, charId) {
+    const c = state.library.find((x) => x.id === charId);
+    if (!c) return;
+    state.library = state.library.filter((x) => x !== c);
+    c.worlds = [...new Set([...(c.worlds || []), state.world.id])];
+    c.developments = (c.devs || {})[state.world.id] || [];
+    state.characters.push(c);
+  }
+  function removeFromWorld(state, charId) {
+    const c = state.characters.find((x) => x.id === charId);
+    if (!c) return;
+    (c.devs = c.devs || {})[state.world.id] = c.developments || [];
+    c.worlds = (c.worlds || []).filter((w) => w !== state.world.id);
+    state.characters = state.characters.filter((x) => x !== c);
+    state.library.push(c);
+  }
+  const worldNames = (c, state) => (c.worlds || []).map((id) => (id === state.world.id ? state.world : (state.otherWorlds.find((x) => x.world.id === id) || {}).world)).filter(Boolean).map((w) => w.name);
+
+  // ---------- character export / import: the sheet and voice, as plain JSON to share or move ----------
+  const CHAR_FIELDS = ['name', 'appearance', 'personality', 'background', 'voice', 'ttsVoice'];
+  function exportCharacter(c) {
+    const out = { aetherstory: 'character-v1' };
+    for (const k of CHAR_FIELDS) if (c[k]) out[k] = c[k];
+    if (c.developments && c.developments.length) out.developments = c.developments;
+    return out;
+  }
+  // Adds the file's character(s) to the open world as new characters. Returns them.
+  function importCharacters(state, j) {
+    const added = [];
+    for (const x of [].concat(j && j.characters ? j.characters : j)) {
+      if (!x || !str(x.name)) continue;
+      const c = { id: uid(), developments: strList(x.developments), worlds: [state.world.id], createdAt: Date.now() };
+      for (const k of CHAR_FIELDS) c[k] = str(x[k]);
+      state.characters.push(c);
+      added.push(c);
+    }
+    return added;
   }
 
   function describeCharacter(c) {
@@ -499,7 +585,7 @@
   const seal = async (obj, key, salt) => ({ aetherstory: 'locked-v1', alg: 'AES-256-GCM, PBKDF2-SHA256', iterations: PBKDF2_ITERATIONS, salt, ...(await encryptWith(obj, key)) });
   const unseal = decryptWith;
 
-  const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
+  const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
     buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;

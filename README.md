@@ -20,6 +20,8 @@ Data is per device and per browser. To move your library between PC and phone, u
 
 After each story the app asks the AI what changed and updates the world, the characters' "story developments", and adds any new recurring characters. The next story reads all of that.
 
+**Worlds** (World tab) lets you run several separate series. Each world has its own stories, world notes and revisions, and a story only ever sees the world it is written in. Characters live in one library: add someone from another world on the Cast tab and they keep their sheet, while what happens to them in each world stays in that world. A world can optionally use its own API key and model. **Export** on a character's page saves them as a JSON file; **Import character** on the Cast tab brings one in.
+
 **Revise** fixes a detail everywhere at once. Type the change in plain words ("Ana has red hair, not black"); the AI updates the character sheets, the world notes and every saved story that contradicts it, shows each change for review, and applies them on one tap. The last five revisions can be undone. Future stories follow the change because they read the updated sheets.
 
 **Listen** reads any story aloud with the voices built into your phone or browser, free and with no setup. Each character speaks their dialogue in their own voice, matched to them automatically (change it on their Cast page). Pick the narrator voice and speed under *Settings → Narration*; downloading "Premium" voices on iPhone or using Edge on PC makes it sound far more natural. For the best voices, paste a Venice API key there (paid, about 3–11¢ a story; replays are free because the audio is saved on the device).

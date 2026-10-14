@@ -232,3 +232,49 @@ test('charactersNamedIn finds characters by first name, ignoring partial words',
   assert.deepEqual(A.charactersNamedIn(s, 'mira is left-handed').map((c) => c.id), ['a']);
   assert.deepEqual(A.charactersNamedIn(s, 'Miranda and Torent'), []);
 });
+
+test('worlds keep their own stories, notes and character developments; shared characters keep their sheet', () => {
+  const s = A.normalizeState(JSON.parse(JSON.stringify(seeded())));
+  A.newWorld(s, 'Second');
+  assert.equal(s.stories.length, 0);
+  assert.equal(s.characters.length, 0);
+  assert.equal(s.library.length, 2);
+  A.addToWorld(s, 'a');
+  assert.deepEqual(s.characters[0].developments, []); // nothing from the first world bleeds in
+  s.characters[0].developments.push('Found a map.');
+  s.characters[0].appearance = 'scarred';
+  const [sys] = A.buildStoryMessages(s, { characterIds: ['a'] });
+  assert.doesNotMatch(sys.content, /Magic is fading|Lost her ship|The Wreck/);
+  const second = s.world.id;
+  assert.ok(A.switchWorld(s, 'main'));
+  assert.equal(s.stories.length, 2);
+  assert.deepEqual(s.characters.find((c) => c.id === 'a').developments, ['Lost her ship.']);
+  assert.equal(s.characters.find((c) => c.id === 'a').appearance, 'scarred');
+  assert.deepEqual(A.worldNames(s.characters.find((c) => c.id === 'a'), s).sort(), ['My World', 'Second']);
+  // A round trip through save/load keeps it all.
+  const t = A.normalizeState(JSON.parse(JSON.stringify(s)));
+  A.switchWorld(t, second);
+  assert.deepEqual(t.characters.map((c) => [c.id, c.developments]), [['a', ['Found a map.']]]);
+  A.deleteWorld(t, 'main');
+  assert.equal(t.otherWorlds.length, 0);
+  assert.ok(t.library.every((c) => !c.worlds.includes('main')));
+});
+
+test('remove from world keeps what happened there for when they return', () => {
+  const s = seeded();
+  A.removeFromWorld(s, 'a');
+  assert.equal(s.characters.length, 1);
+  A.addToWorld(s, 'a');
+  assert.deepEqual(s.characters.find((c) => c.id === 'a').developments, ['Lost her ship.']);
+});
+
+test('character export/import round trip makes a new character in the open world', () => {
+  const s = seeded();
+  const file = JSON.parse(JSON.stringify(A.exportCharacter(s.characters[0])));
+  assert.equal(file.id, undefined);
+  const [c] = A.importCharacters(s, file);
+  assert.equal(c.name, 'Mira');
+  assert.notEqual(c.id, 'a');
+  assert.deepEqual(c.developments, ['Lost her ship.']);
+  assert.equal(A.importCharacters(s, { name: '' }).length, 0);
+});
