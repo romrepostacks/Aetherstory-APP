@@ -67,7 +67,9 @@ async function chat(messages, opts = {}) {
   }
 }
 async function chatOnce(messages, { onToken, signal, stream = true } = {}) {
-  const s = state.settings;
+  // A world can use its own key and model, so its stories run on a separate account.
+  const ai = state.world.ai || {};
+  const s = { ...state.settings, ...(ai.apiKey ? { apiKey: ai.apiKey } : {}), ...(ai.model ? { model: ai.model } : {}) };
   if (!s.baseUrl || !s.model) throw new Error('Set an AI provider and model in Settings first.');
   const headers = { 'Content-Type': 'application/json' };
   if (s.apiKey) headers.Authorization = 'Bearer ' + s.apiKey;
@@ -244,6 +246,12 @@ function h(tag, attrs, ...kids) {
   for (const k of kids.flat(Infinity)) if (k != null && k !== false) el.append(k.nodeType ? k : String(k));
   return el;
 }
+const download = (text, name) => {
+  const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' })), download: name });
+  document.body.append(a); a.click(); a.remove();
+};
+// Per-world keys never travel in a backup, in either direction.
+const dropWorldKeys = (data) => { for (const w of [data.world, ...data.otherWorlds.map((x) => x.world)]) w.ai = { apiKey: '', model: w.ai ? w.ai.model || '' : '' }; };
 const field = (label, input) => [h('label', {}, label), input];
 const fmtDate = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
@@ -475,12 +483,28 @@ const VIEWS = {
 
   characters() {
     if (ui.param) return characterEditor(ui.param === 'new' ? null : state.characters.find((c) => c.id === ui.param));
-    return [h('h2', {}, `Cast (${state.characters.length})`),
-      h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => go('characters', 'new') }, '+ New character')),
+    const file = h('input', { type: 'file', accept: 'application/json,.json', style: 'display:none', onchange: async (e) => {
+      const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+      try {
+        const added = A.importCharacters(state, JSON.parse(await f.text()));
+        if (!added.length) throw new Error('no character in it');
+        await save(); ui.status = `Imported ${added.map((c) => c.name).join(', ')}.`; render();
+      } catch (err) { alert('Could not read that file: ' + err.message); }
+    } });
+    const lib = state.library;
+    return [h('h2', {}, `Cast of ${state.world.name} (${state.characters.length})`),
+      h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => go('characters', 'new') }, '+ New character'),
+        h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import character'), file),
+      h('div', { class: 'status', id: 'status' }, ui.status),
       state.characters.length ? state.characters.map((c) => h('div', { class: 'card', onclick: () => go('characters', c.id) },
         h('h3', {}, c.name), h('p', {}, c.personality || c.background || ''),
         (c.developments || []).length > 0 && h('p', {}, `${c.developments.length} story developments`)))
-        : h('div', { class: 'empty' }, 'No characters yet. Create one, or use Quick start on the Write tab.')];
+        : h('div', { class: 'empty' }, 'No characters yet. Create one, or use Quick start on the Write tab.'),
+      lib.length > 0 && [h('h2', {}, `From your other worlds (${lib.length})`),
+        h('p', { class: 'muted' }, 'Bring someone in and they keep who they are. What happens to them here stays in this world.'),
+        lib.map((c) => h('div', { class: 'card setup' }, h('h3', {}, c.name),
+          h('p', {}, [A.worldNames(c, state).join(', '), c.personality].filter(Boolean).join(' · ')),
+          h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: async () => { A.addToWorld(state, c.id); await save(); render(); } }, `+ Add to ${state.world.name}`))))]];
   },
 
   world() {
@@ -494,10 +518,32 @@ const VIEWS = {
       t.value = w[key].join('\n');
       return field(`${label} (${w[key].length}, one per line)`, t);
     };
-    return [h('h2', {}, 'World'),
+    const ai = w.ai = w.ai || { apiKey: '', model: '' };
+    const aiBox = (key, attrs) => h('input', { ...attrs, value: ai[key], onchange: (e) => { ai[key] = e.target.value.trim(); save(); } });
+    const open = (id) => { A.switchWorld(state, id); Object.assign(ui, { selected: [], pov: '', currentId: null, revision: null, reviseLog: [], status: '' }); save(); go('write'); };
+    return [h('h2', {}, `Worlds (${state.otherWorlds.length + 1})`),
+      h('p', { class: 'muted' }, 'Each world keeps its own stories and notes, and stories only ever see the world they are written in. Characters can join any world from the Cast tab.'),
+      h('div', { class: 'card setup' }, h('h3', {}, `✓ ${w.name}`), h('p', {}, `${state.stories.length} stories, ${state.characters.length} characters · open now`)),
+      state.otherWorlds.map((x) => h('div', { class: 'card', onclick: () => open(x.world.id) }, h('h3', {}, x.world.name),
+        h('p', {}, `${x.stories.length} stories · tap to open`),
+        h('div', { class: 'row' }, h('button', { class: 'btn danger', onclick: async (e) => {
+          e.stopPropagation();
+          if (!confirm(`Delete the world "${x.world.name}" and its ${x.stories.length} stories? Its characters stay in your library.`)) return;
+          A.deleteWorld(state, x.world.id); await save(); render();
+        } }, 'Delete')))),
+      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => {
+        const n = prompt('Name the new world (or leave blank and Quick start names it):', '');
+        if (n === null) return;
+        A.newWorld(state, n.trim() || 'New World'); open(state.world.id);
+      } }, '+ New world')),
+      h('h2', {}, 'This world'),
       h('p', { class: 'muted' }, 'This is the series bible. It grows automatically after every story, and every new story reads it. Edit freely.'),
       ...field('Name', name), ...field('Overview', overview),
-      ...listBox('lore', 'Lore'), ...listBox('places', 'Places'), ...listBox('relationships', 'Relationships'), ...listBox('timeline', 'Timeline')];
+      ...listBox('lore', 'Lore'), ...listBox('places', 'Places'), ...listBox('relationships', 'Relationships'), ...listBox('timeline', 'Timeline'),
+      h('details', {}, h('summary', {}, 'AI key for this world (optional)'),
+        h('p', { class: 'muted' }, 'Leave blank to use the key and model from Settings. Stories never see other worlds either way; a separate key just keeps this world on its own account.'),
+        ...field('API key', aiBox('apiKey', { type: 'password', autocomplete: 'off', placeholder: 'Same as Settings' })),
+        ...field('Model', aiBox('model', { placeholder: state.settings.model })))];
   },
 
   revise() {
@@ -552,10 +598,11 @@ const VIEWS = {
     };
     const restore = async (raw) => {
       const data = A.normalizeState(raw);
-      if (!confirm(`Replace your library with this backup (${data.stories.length} stories, ${data.characters.length} characters)?`)) return;
+      if (!confirm(`Replace your library with this backup (${data.otherWorlds.length + 1} worlds, ${data.stories.length + data.otherWorlds.reduce((n, x) => n + x.stories.length, 0)} stories)?`)) return;
       // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
       for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey']) data.settings[k] = s[k];
       data.settings.ageOk = true;
+      dropWorldKeys(data);
       state = data; ui.pendingImport = null; await save(); render();
     };
     const file = h('input', { type: 'file', accept: 'application/json,.json', style: 'display:none', onchange: async (e) => {
@@ -568,13 +615,9 @@ const VIEWS = {
         await restore(plain);
       } catch (err) { alert('Could not read that file: ' + err.message); }
     } });
-    const download = (text, name) => {
-      const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' })), download: name });
-      document.body.append(a); a.click(); a.remove();
-    };
     const exportLib = async () => {
       const data = JSON.parse(JSON.stringify(state));
-      data.settings.apiKey = ''; data.settings.ttsKey = '';
+      data.settings.apiKey = ''; data.settings.ttsKey = ''; dropWorldKeys(data);
       download(JSON.stringify(await A.encryptBackup(data, await deviceKey())), `aetherstory-${new Date().toISOString().slice(0, 10)}.json`);
     };
     // A backup from another device: ask for that device's key file (or the pasted key).
@@ -618,7 +661,7 @@ const VIEWS = {
           h('button', { class: 'btn ghost', onclick: async () => { if (!confirm('Turn off the lock? Your library will be stored unencrypted on this device.')) return; await setLock(null); render(); } }, 'Turn off'))]
         : lockSetup(),
       h('h2', {}, 'Library'),
-      h('p', { class: 'muted' }, `${state.stories.length} stories, ${state.characters.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
+      h('p', { class: 'muted' }, `${state.otherWorlds.length + 1} worlds, ${state.stories.length + state.otherWorlds.reduce((n, x) => n + x.stories.length, 0)} stories, ${state.characters.length + state.library.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
       h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'),
         h('button', { class: 'btn ghost', onclick: async () => download(await deviceKey(), 'aetherstory-key.txt') }, 'Download key'), file,
         h('button', { class: 'btn danger', onclick: eraseAll }, 'Erase everything')),
@@ -712,7 +755,9 @@ function characterEditor(c) {
     voice && [...field('Voice when stories are read aloud', voice), h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: hear }, listenLabel('voice')))],
     status,
     h('div', { class: 'row' }, h('button', { class: 'btn', onclick: saveChar }, 'Save'),
-      c && h('button', { class: 'btn danger', onclick: async () => { if (!confirm(`Delete ${c.name}?`)) return; state.characters = state.characters.filter((x) => x !== c); ui.selected = ui.selected.filter((x) => x !== c.id); await save(); go('characters'); } }, 'Delete')),
+      c && h('button', { class: 'btn ghost', onclick: () => download(JSON.stringify(A.exportCharacter(c), null, 2), `${c.name.replace(/[^\w-]+/g, '-')}.json`) }, 'Export'),
+      c && A.worldNames(c, state).length > 1 && h('button', { class: 'btn ghost', onclick: async () => { A.removeFromWorld(state, c.id); ui.selected = ui.selected.filter((x) => x !== c.id); await save(); go('characters'); } }, 'Remove from this world'),
+      c && h('button', { class: 'btn danger', onclick: async () => { if (!confirm(`Delete ${c.name}${A.worldNames(c, state).length > 1 ? ' from every world' : ''}?`)) return; state.characters = state.characters.filter((x) => x !== c); ui.selected = ui.selected.filter((x) => x !== c.id); await save(); go('characters'); } }, 'Delete')),
     appearsIn.length > 0 && [h('h2', {}, 'Appears in'), appearsIn.map((s) => h('div', { class: 'card', onclick: () => go('stories', s.id) }, h('h3', {}, s.title), h('p', {}, s.summary || '')))]];
 }
 
