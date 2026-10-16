@@ -279,11 +279,13 @@ test('character export/import round trip makes a new character in the open world
   assert.equal(A.importCharacters(s, { name: '' }).length, 0);
 });
 
-test('free OpenRouter models fall back to other free models; paid and other services do not', () => {
+test('free OpenRouter models fall back to another free Nemotron, then the free router; paid and other services do not', () => {
   const or = 'https://openrouter.ai/api/v1';
-  const d = A.emptyState().settings.model;
-  assert.deepEqual(A.freeFallbacks(or, d), [d, 'google/gemma-4-31b-it:free', 'openrouter/free']);
-  assert.deepEqual(A.freeFallbacks(or, 'google/gemma-4-31b-it:free'), ['google/gemma-4-31b-it:free', 'openrouter/free']);
+  const V = 'nvidia/nemotron-3.5-super-vl:free', U = 'nvidia/nemotron-3-ultra-550b-a55b:free';
+  assert.equal(A.emptyState().settings.model, V);
+  assert.equal(A.normalizeState({ settings: { model: U } }).settings.model, V);
+  assert.deepEqual(A.freeFallbacks(or, V), [V, U, 'openrouter/free']);
+  assert.deepEqual(A.freeFallbacks(or, 'google/gemma-4-31b-it:free'), ['google/gemma-4-31b-it:free', V, 'openrouter/free']);
   assert.equal(A.freeFallbacks(or, 'sao10k/l3.3-euryale-70b'), null);
   assert.equal(A.freeFallbacks('http://localhost:11434/v1', 'x:free'), null);
 });
