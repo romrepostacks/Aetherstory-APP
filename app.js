@@ -76,7 +76,7 @@ async function chatOnce(messages, { onToken, signal, stream = true } = {}) {
   const res = await fetch(s.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
     method: 'POST', headers, signal,
     // Private mode: OpenRouter only routes to providers that don't store or train on prompts.
-    body: JSON.stringify({ model: s.model, messages, temperature: Number(s.temperature) || 0.9, stream,
+    body: JSON.stringify({ model: s.model, models: A.freeFallbacks(s.baseUrl, s.model) || undefined, messages, temperature: Number(s.temperature) || 0.9, stream,
       ...(s.privateOnly && s.baseUrl.includes('openrouter.ai') ? { provider: { data_collection: 'deny' } } : {}) }),
   });
   if (!res.ok) {

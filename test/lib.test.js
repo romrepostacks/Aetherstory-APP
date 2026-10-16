@@ -278,3 +278,12 @@ test('character export/import round trip makes a new character in the open world
   assert.deepEqual(c.developments, ['Lost her ship.']);
   assert.equal(A.importCharacters(s, { name: '' }).length, 0);
 });
+
+test('free OpenRouter models fall back to other free models; paid and other services do not', () => {
+  const or = 'https://openrouter.ai/api/v1';
+  const d = A.emptyState().settings.model;
+  assert.deepEqual(A.freeFallbacks(or, d), [d, 'google/gemma-4-31b-it:free', 'openrouter/free']);
+  assert.deepEqual(A.freeFallbacks(or, 'google/gemma-4-31b-it:free'), ['google/gemma-4-31b-it:free', 'openrouter/free']);
+  assert.equal(A.freeFallbacks(or, 'sao10k/l3.3-euryale-70b'), null);
+  assert.equal(A.freeFallbacks('http://localhost:11434/v1', 'x:free'), null);
+});
