@@ -76,7 +76,7 @@ async function chatOnce(messages, { onToken, signal, stream = true } = {}) {
   const res = await fetch(s.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
     method: 'POST', headers, signal,
     // Private mode: OpenRouter only routes to providers that don't store or train on prompts.
-    body: JSON.stringify({ model: s.model, messages, temperature: Number(s.temperature) || 0.9, stream,
+    body: JSON.stringify({ model: s.model, models: A.freeFallbacks(s.baseUrl, s.model) || undefined, messages, temperature: Number(s.temperature) || 0.9, stream,
       ...(s.privateOnly && s.baseUrl.includes('openrouter.ai') ? { provider: { data_collection: 'deny' } } : {}) }),
   });
   if (!res.ok) {
@@ -376,7 +376,7 @@ async function planRevision(revision) {
 
 // ---------- views ----------
 const PRESETS = {
-  'OpenRouter: Nemotron 3 Ultra (free, default)': ['https://openrouter.ai/api/v1', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
+  'OpenRouter: Nemotron 3.5 Super VL (free, default)': ['https://openrouter.ai/api/v1', 'nvidia/nemotron-3.5-super-vl:free'],
   'OpenRouter: Gemma 4 31B (free)': ['https://openrouter.ai/api/v1', 'google/gemma-4-31b-it:free'],
   'OpenRouter: Venice Uncensored (paid, under 1¢ a story)': ['https://openrouter.ai/api/v1', 'cognitivecomputations/dolphin-mistral-24b-venice-edition'],
   'OpenRouter: Euryale 70B (paid, best)': ['https://openrouter.ai/api/v1', 'sao10k/l3.3-euryale-70b'],

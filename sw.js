@@ -1,5 +1,5 @@
 // Offline app shell. Bump VERSION when shipping changes so phones pick them up.
-const VERSION = 'aetherstory-v17';
+const VERSION = 'aetherstory-v18';
 const SHELL = ['./', 'index.html', 'app.js', 'lib.js', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));

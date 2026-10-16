@@ -9,7 +9,7 @@
       settings: {
         baseUrl: 'https://openrouter.ai/api/v1',
         apiKey: '',
-        model: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+        model: 'nvidia/nemotron-3.5-super-vl:free',
         temperature: 0.9,
         style: '',
         mature: true,
@@ -34,7 +34,8 @@
   const emptyWorld = (id, name) => ({ id, name, overview: '', lore: [], places: [], relationships: [], timeline: [], ai: { apiKey: '', model: '' } });
 
   // Models that stopped being offered under a saved id; swapped on load so old settings keep working.
-  const RETIRED = { 'venice/uncensored:free': 'nvidia/nemotron-3-ultra-550b-a55b:free' };
+  // Nemotron 3 Ultra's free provider started failing on 2026-10-16; it stays a fallback (see freeFallbacks).
+  const RETIRED = { 'venice/uncensored:free': 'nvidia/nemotron-3.5-super-vl:free', 'nvidia/nemotron-3-ultra-550b-a55b:free': 'nvidia/nemotron-3.5-super-vl:free' };
   const BUILTIN = 'builtin'; // the removed on-device model; saved setups fall back to the default
 
   // Fill in anything missing so old exports / partial imports still load.
@@ -512,6 +513,15 @@
     return runs.flatMap((r) => speechChunks(r.text, max).map((text) => ({ voice: r.voice, text })));
   }
 
+  // Free models come and go on OpenRouter (a provider can drop one overnight), so a free pick falls back to
+  // another free Nemotron and then to OpenRouter's free router, which takes whichever free model is up.
+  // ponytail: three entries, OpenRouter has capped this list at 3 before.
+  const FREE_NEMOTRONS = ['nvidia/nemotron-3.5-super-vl:free', 'nvidia/nemotron-3-ultra-550b-a55b:free'];
+  function freeFallbacks(baseUrl, model) {
+    if (!String(baseUrl).includes('openrouter.ai') || !/:free$/.test(model)) return null;
+    return [model, FREE_NEMOTRONS.find((m) => m !== model), 'openrouter/free'];
+  }
+
   // OpenRouter can answer 200 with {"error": ...} instead of choices when the model's provider fails or is busy.
   function providerError(d) {
     const e = d && d.error;
@@ -585,7 +595,7 @@
   const seal = async (obj, key, salt) => ({ aetherstory: 'locked-v1', alg: 'AES-256-GCM, PBKDF2-SHA256', iterations: PBKDF2_ITERATIONS, salt, ...(await encryptWith(obj, key)) });
   const unseal = decryptWith;
 
-  const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
+  const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
     buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
