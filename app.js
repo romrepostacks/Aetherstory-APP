@@ -301,7 +301,13 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 let state = A.emptyState();
 const ui = { draft: '', backupName: '', locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null, reviseText: '', revision: null, reviseLog: [], drawing: null, comic: false };
 const openStory = (s) => { ui.comic = false; go(s.chat ? 'chat' : 'stories', s.id); };
-const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['revise', '🪄', 'Revise'], ['settings', '⚙️', 'Settings']];
+const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['settings', '⚙️', 'Settings']];
+// Sub-pages light up the tab they live under.
+const TAB_OF = { help: 'settings', revise: 'world', chat: 'characters' };
+// A tappable row that opens a sub-page.
+const menuCard = (icon, title, hint, onclick) => h('div', { class: 'card go', onclick }, h('span', { class: 'ico' }, icon), h('div', {}, h('h3', {}, title), hint && h('p', {}, hint)), h('span', { class: 'arrow' }, '›'));
+const backChip = (label, onclick) => h('button', { class: 'chip back', onclick }, '‹ ' + label);
+const box = (title, ...kids) => h('section', { class: 'box' }, title && h('h3', {}, title), kids);
 
 function go(view, param = null) {
   state.stories = state.stories.filter((s) => !s.chat || s.messages.length || s.id === param); // a chat nobody wrote in isn't kept
@@ -315,7 +321,7 @@ function render() {
   if (ui.locked) return view.replaceChildren(...lockScreen());
   if (!state.settings.ageOk) return view.replaceChildren(...ageGate());
   if (!state.settings.setupDone) return view.replaceChildren(...[setupWizard()].flat(Infinity).filter((n) => n && n.nodeType));
-  nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: (ui.view === 'help' ? 'settings' : ui.view) === v ? 'on' : '', onclick: () => go(v) }, h('span', {}, icon), label)));
+  nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: (TAB_OF[ui.view] || ui.view) === v ? 'on' : '', 'aria-current': (TAB_OF[ui.view] || ui.view) === v ? 'page' : null, onclick: () => go(v) }, h('span', { 'aria-hidden': 'true' }, icon), label)));
   view.replaceChildren(...[VIEWS[ui.view]()].flat(Infinity).filter((n) => n && n.nodeType));
 }
 
@@ -385,13 +391,18 @@ async function sendChat(talk, text) {
 }
 // Like after a story: the world, the characters' developments and the summary pick up what happened.
 async function endChat(talk) {
-  ui.busy = true; render(); setStatus('Updating your world from this chat…');
+  const j = startJob('Adding this chat to your world', ['Reading the chat for anything new', 'Updating characters and world notes']);
+  if (!j) return;
+  ui.busy = true; ui.status = ''; render();
+  j.step(0, `Your AI is looking for new facts, places, relationships and character developments in ${talk.messages.length} messages.`);
   try {
-    const changes = A.applyWorldUpdate(state, talk, await chatJson(A.buildWorldUpdateMessages(state, talk)));
+    const changes = A.applyWorldUpdate(state, talk, await chatJson(A.buildWorldUpdateMessages(state, talk), { signal: j.signal }));
+    j.step(1, changes.length ? 'Found: ' + changes.join(', ') : 'Nothing new this time.');
     talk.worldAt = talk.messages.length;
     await save();
-    setStatus(changes.length ? 'World updated: ' + changes.join(', ') : 'Saved. Nothing new for the world this time.');
-  } catch (e) { setStatus('The world update failed: ' + e.message); }
+    ui.status = changes.length ? 'World updated: ' + changes.join(', ') : 'Saved. Nothing new for the world this time.';
+    j.end();
+  } catch (e) { if (!j.signal.aborted) ui.status = 'The world update failed: ' + e.message; j.end(e); finish(); return; }
   await condenseMemory();
   await autoBackup().catch(() => {});
   finish();
@@ -409,6 +420,58 @@ async function condenseMemory() {
   setStatus(s);
 }
 
+// ---------- slow jobs: one pop-up showing each step, what is happening right now, and a Cancel that really stops the request ----------
+// One job at a time. Its signal goes to every fetch, so Cancel aborts the AI call or picture mid-way. A failure stays on screen until closed.
+let job = null, jobTimer = null;
+function startJob(title, steps) {
+  if (job) { job.hidden = false; drawJob(); return null; } // already busy: show what's running instead
+  const ctl = new AbortController();
+  const j = job = { title, steps: steps.map((label) => ({ label, state: 'wait' })), detail: '', error: '', started: Date.now(), hidden: false, signal: ctl.signal,
+    cancel: () => ctl.abort(),
+    // Step i is running, everything before it is done. `detail` says what's happening in plain words.
+    step: (i, detail = '') => { if (job !== j || j.error) return; j.steps.forEach((x, k) => { x.state = k < i ? 'ok' : k === i ? 'run' : 'wait'; }); j.detail = detail; drawJob(); },
+    note: (detail) => { if (job !== j || j.error) return; j.detail = detail; drawJob(); },
+    end: (err) => {
+      if (job !== j) return;
+      if (!err || ctl.signal.aborted) { job = null; return drawJob(); }
+      const at = j.steps.find((x) => x.state === 'run') || j.steps[0];
+      if (at) at.state = 'fail';
+      j.error = err.message; j.hidden = false; drawJob();
+    } };
+  drawJob();
+  return j;
+}
+const closeJob = () => { if (job) job.cancel(); job = null; drawJob(); };
+const fmtSecs = (s) => (s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`);
+function drawJob() {
+  const el = document.getElementById('job'), pill = document.getElementById('jobPill');
+  clearInterval(jobTimer);
+  el.hidden = !job || job.hidden; pill.hidden = !job || !job.hidden;
+  if (!job) return el.replaceChildren();
+  const j = job, now = j.steps.find((x) => x.state === 'run');
+  const time = h('span', { class: 'muted' }, fmtSecs((Date.now() - j.started) / 1000));
+  if (!j.error) jobTimer = setInterval(() => { time.textContent = fmtSecs((Date.now() - j.started) / 1000); }, 1000);
+  pill.replaceChildren(h('span', { class: 'spinner' }), `${j.title}${now ? ' · ' + now.label : ''}`);
+  pill.onclick = () => { j.hidden = false; drawJob(); };
+  const icon = { wait: '○', ok: '✓', fail: '✗' };
+  el.replaceChildren(h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'jobTitle' },
+    h('h2', { id: 'jobTitle' }, j.title), j.error ? h('span', { class: 'muted' }, 'Stopped') : time,
+    h('ul', {}, j.steps.map((x) => h('li', { class: x.state }, x.state === 'run' && !j.error ? h('span', { class: 'spinner' }) : h('span', { class: 'ic' }, icon[x.state]), x.label))),
+    (j.error || j.detail) && h('p', { class: 'detail' + (j.error ? ' fail' : ''), 'aria-live': 'polite' }, j.error || j.detail),
+    h('div', { class: 'row' }, j.error ? h('button', { class: 'btn', onclick: closeJob }, 'Close')
+      : [h('button', { class: 'btn ghost', onclick: () => { j.hidden = true; drawJob(); } }, 'Hide'), h('button', { class: 'btn danger', onclick: closeJob }, 'Cancel')])));
+}
+// A wait that Cancel cuts short, so the pop-up and the page settle the moment it's tapped.
+const pause = (ms, signal) => new Promise((res, rej) => {
+  const t = setTimeout(res, ms);
+  if (signal) signal.addEventListener('abort', () => { clearTimeout(t); rej(signal.reason); }, { once: true });
+});
+// Who draws the pictures, in words for the pop-up.
+const artist = () => (state.settings.comfyUrl && !comfyNote ? 'your PC (ComfyUI)' : 'AI Horde\'s volunteer computers');
+// AI Horde's queue check, in words: place in line, its own time estimate, or that someone is drawing it now.
+const waitText = (c = {}) => [c.processing ? 'An artist is drawing it now' : c.queue_position ? `#${c.queue_position} in line` : '',
+  c.wait_time ? `about ${fmtSecs(c.wait_time)} left` : ''].filter(Boolean).join(', ');
+
 // ---------- pictures: AI Horde, free volunteer-run image generation (anonymous works; a free key gets them sooner) ----------
 const HORDE = 'https://aihorde.net/api/v2';
 // Every picture is 2D anime/manhwa art, never realistic or 3D: anime-trained models only, plus the style in the prompt and its opposite in the negative.
@@ -421,17 +484,18 @@ const NEGATIVE = 'photorealistic, realistic, photo, photography, 3d, 3d render, 
 const PRIVATE_PICTURES = 'Pictures are off in Private mode: AI Horde\'s volunteer computers would see the descriptions. Draw them on your own PC with ComfyUI instead (Settings → Help & guides).';
 const canDraw = () => !state.settings.privateOnly || !!state.settings.comfyUrl;
 let comfyNote = ''; // why the last picture went to Horde instead of the PC, shown with the progress
-async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature } = {}) {
+async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature, signal } = {}) {
   const s = state.settings;
   prompt = [prompt, nsfw && A.spiceText(s, 'image')].filter(Boolean).join(', ');
   if (s.comfyUrl) {
-    try { const img = await drawComfy(prompt, onWait, { width, height, nsfw }); comfyNote = ''; return img; } catch (e) {
+    try { const img = await drawComfy(prompt, onWait, { width, height, nsfw, signal }); comfyNote = ''; return img; } catch (e) {
+      if (signal && signal.aborted) throw e; // cancelled, not broken: don't hand it to Horde
       const why = comfyError(e);
       if (s.privateOnly) throw new Error(why + ' Private mode is on, so AI Horde isn\'t used instead. See Settings → Help & guides.');
       comfyNote = ` ${why} AI Horde is drawing instead.`;
     }
   } else if (s.privateOnly) throw new Error(PRIVATE_PICTURES);
-  return drawHorde(prompt, onWait, { width, height, nsfw });
+  return drawHorde(prompt, onWait, { width, height, nsfw, signal });
 }
 
 // ---------- pictures on the user's own PC: ComfyUI started with --enable-cors-header (guide in help.js) ----------
@@ -444,7 +508,7 @@ async function comfyModels() {
   const opt = (await res.json()).CheckpointLoaderSimple.input.required.ckpt_name;
   return Array.isArray(opt[0]) ? opt[0] : (opt[1] && opt[1].options) || []; // older and newer ComfyUI list choices differently
 }
-async function drawComfy(prompt, onWait, { width, height, nsfw }) {
+async function drawComfy(prompt, onWait, { width, height, nsfw, signal }) {
   const model = state.settings.comfyModel || (await comfyModels())[0];
   if (!model) throw new Error('ComfyUI has no model yet. Put an anime model in ComfyUI\'s models\\checkpoints folder and restart it.');
   const k = Math.sqrt(1024 * 1024 / (width * height)), px = (x) => Math.round((x * k) / 64) * 64; // SDXL models draw best near one megapixel
@@ -458,39 +522,40 @@ async function drawComfy(prompt, onWait, { width, height, nsfw }) {
     6: { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
     7: { class_type: 'PreviewImage', inputs: { images: ['6', 0] } }, // ComfyUI's temp folder: nothing piles up in its output folder
   };
-  const res = await fetch(comfyBase() + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }) });
+  const res = await fetch(comfyBase() + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }), signal });
   const job = await res.json().catch(() => ({}));
   if (!res.ok || !job.prompt_id) throw new Error(`ComfyUI refused the picture (${(job.error && job.error.message) || res.status}).`);
   const started = Date.now();
+  // ponytail: Cancel stops waiting but lets ComfyUI finish the one picture it's on (seconds); POST /interrupt if that ever matters.
   for (;;) {
-    await new Promise((r) => setTimeout(r, 1500));
-    const run = (await (await fetch(`${comfyBase()}/history/${job.prompt_id}`)).json())[job.prompt_id];
+    await pause(1500, signal);
+    const run = (await (await fetch(`${comfyBase()}/history/${job.prompt_id}`, { signal })).json())[job.prompt_id];
     const img = run && Object.values(run.outputs || {}).flatMap((o) => o.images || [])[0];
-    if (img) return shrinkImage(await (await fetch(`${comfyBase()}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`)).blob());
+    if (img) return shrinkImage(await (await fetch(`${comfyBase()}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`, { signal })).blob());
     if (run && run.status && run.status.status_str === 'error') throw new Error('ComfyUI hit an error drawing this picture; its window shows why.');
     if (Date.now() - started > 5 * 60e3) throw new Error('ComfyUI took more than 5 minutes for one picture.');
-    if (onWait) onWait({});
+    if (onWait) onWait({ processing: true });
   }
 }
 
-async function drawHorde(prompt, onWait, { width, height, nsfw }) {
+async function drawHorde(prompt, onWait, { width, height, nsfw, signal }) {
   const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-APP' };
   const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt: `anime style, 2d illustration, ${prompt} ### ${NEGATIVE}`,
-    params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw, censor_nsfw: false, r2: false, models: ANIME_MODELS }) });
+    params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw, censor_nsfw: false, r2: false, models: ANIME_MODELS }), signal });
   const job = await res.json().catch(() => ({}));
   if (!res.ok || !job.id) throw new Error(`The picture request failed (${res.status}). ${job.message || ''}`);
   const started = Date.now();
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 6000));
-    const c = await (await fetch(`${HORDE}/generate/check/${job.id}`, { headers })).json().catch(() => ({}));
-    if (c.done) break;
-    if (c.faulted || c.is_possible === false || Date.now() - started > 15 * 60e3) {
-      fetch(`${HORDE}/generate/status/${job.id}`, { method: 'DELETE', headers }).catch(() => {});
-      throw new Error('No artist was free for this picture right now.');
+  const drop = () => fetch(`${HORDE}/generate/status/${job.id}`, { method: 'DELETE', headers }).catch(() => {}); // frees the volunteers for someone else
+  try {
+    for (;;) {
+      await pause(6000, signal);
+      const c = await (await fetch(`${HORDE}/generate/check/${job.id}`, { headers, signal })).json().catch(() => ({}));
+      if (c.done) break;
+      if (c.faulted || c.is_possible === false || Date.now() - started > 15 * 60e3) { drop(); throw new Error('No artist was free for this picture right now.'); }
+      if (onWait) onWait(c);
     }
-    if (onWait) onWait(c);
-  }
-  const g = ((await (await fetch(`${HORDE}/generate/status/${job.id}`, { headers })).json()).generations || [])[0];
+  } catch (e) { if (signal && signal.aborted) drop(); throw e; }
+  const g = ((await (await fetch(`${HORDE}/generate/status/${job.id}`, { headers, signal })).json()).generations || [])[0];
   if (!g || !g.img || g.censored) throw new Error(g && g.censored ? 'The artist\'s filter blocked this picture.' : 'No picture came back.');
   const blob = g.img.startsWith('http') ? await (await fetch(g.img)).blob() : new Blob([Uint8Array.from(atob(g.img), (ch) => ch.charCodeAt(0))], { type: 'image/webp' });
   return shrinkImage(blob);
@@ -501,12 +566,15 @@ async function drawHorde(prompt, onWait, { width, height, nsfw }) {
 async function makeComic(story, replan) {
   if (ui.drawing) return;
   if (!canDraw()) return setStatus(PRIVATE_PICTURES);
+  const plan = replan || !(story.panels || []).length;
+  const j = startJob('Making your comic', [plan && 'Planning the panels', 'Drawing the panels'].filter(Boolean));
+  if (!j) return;
   const here = () => ui.view === 'stories' && ui.param === story.id;
-  ui.drawing = story.id; ui.comic = true; render();
+  ui.drawing = story.id; ui.comic = true; ui.status = ''; render();
   try {
-    if (replan || !(story.panels || []).length) {
-      setStatus('Planning the panels…');
-      const panels = A.toPanels(state, await chatJson(A.buildPanelMessages(state, story)));
+    if (plan) {
+      j.step(0, 'Your story AI is reading the story and splitting it into scenes, with a caption and speech bubbles for each.');
+      const panels = A.toPanels(state, await chatJson(A.buildPanelMessages(state, story), { signal: j.signal }));
       if (!panels.length) throw new Error('No panels came back.');
       story.panels = panels;
       await save(); if (here()) render();
@@ -514,17 +582,22 @@ async function makeComic(story, replan) {
     // ponytail: 2 at a time, in story order; raise it if Horde lets anonymous users run more at once.
     const todo = story.panels.filter((p) => !p.img), total = todo.length;
     let done = 0;
-    const progress = (c) => setStatus(`Drawing panels: ${done} of ${total} done${c && c.queue_position ? `, #${c.queue_position} in line` : ''}…${comfyNote}`);
+    const progress = (c) => j.step(plan ? 1 : 0, [`${done} of ${total} panels done. Drawing on ${artist()}.`, waitText(c), comfyNote.trim(),
+      'Finished panels appear on the page as they land, so Hide lets you watch.'].filter(Boolean).join('\n'));
     progress();
     await Promise.all([0, 1].map(async () => {
       for (let p; (p = todo.shift());) {
-        try { p.img = await drawImage(p.prompt, progress); } catch (e) { todo.length = 0; throw e; } // the other one stops after its current panel
+        try { p.img = await drawImage(p.prompt, progress, { signal: j.signal }); } catch (e) { todo.length = 0; throw e; } // the other one stops after its current panel
         done++; progress();
         await save(); if (here()) render();
       }
     }));
     ui.status = 'Comic ready.';
-  } catch (e) { ui.status = e.message + ' Tap "Draw missing panels" to try again.'; }
+    j.end();
+  } catch (e) {
+    ui.status = j.signal.aborted ? 'Comic stopped. Panels already drawn are kept: tap "Draw missing panels" to carry on.' : e.message + ' Tap "Draw missing panels" to try again.';
+    j.end(e);
+  }
   ui.drawing = null;
   if (here()) render();
   setStatus(ui.status);
@@ -546,13 +619,18 @@ async function shrinkImage(file, max = 768) {
 function finish() { ui.busy = false; ui.abort = null; const s = ui.status; render(); setStatus(s); }
 
 async function quickstart(vibe) {
-  ui.busy = true; render(); setStatus('Dreaming up a world…');
+  const j = startJob('Creating your world', ['Dreaming up a world and its cast', 'Saving it to your library']);
+  if (!j) return;
+  ui.busy = true; ui.status = ''; render();
+  j.step(0, vibe ? `Building a world around "${vibe}": a name, an overview, places, lore and three or four characters.` : 'No vibe given, so the AI picks one: a name, an overview, places, lore and three or four characters.');
   try {
-    const added = A.applyQuickstart(state, await chatJson(A.buildQuickstartMessages(vibe)));
+    const added = A.applyQuickstart(state, await chatJson(A.buildQuickstartMessages(vibe), { signal: j.signal }));
+    j.step(1, `Met ${added.map((c) => c.name).join(', ')}.`);
     ui.selected = added.map((c) => c.id);
     await save();
     ui.status = `Created ${state.world.name} with ${added.map((c) => c.name).join(', ')}. Hit Generate.`;
-  } catch (e) { ui.status = e.message; }
+    j.end();
+  } catch (e) { if (!j.signal.aborted) ui.status = e.message; j.end(e); }
   finish();
 }
 
@@ -676,16 +754,16 @@ const VIEWS = {
     }
     if (!state.characters.length) {
       const vibe = h('input', { placeholder: 'Optional: a one-line vibe, e.g. "rival witches in a rainy port city"' });
-      nodes.push(h('h2', {}, 'Quick start'),
+      nodes.push(box('✨ Quick start',
         h('p', { class: 'muted' }, 'Let the AI build a world and a starting cast for you. You can edit everything later.'),
         vibe, h('div', { class: 'row' }, h('button', { class: 'btn', disabled: ui.busy, onclick: () => quickstart(vibe.value.trim()) }, '✨ Create my world')),
-        h('p', { class: 'muted' }, 'Or add your own characters in the Cast tab.'));
+        h('p', { class: 'muted' }, 'Or add your own characters in the Cast tab.')));
     } else {
-      nodes.push(h('h2', {}, 'Who is in this story?'), h('p', { class: 'muted' }, 'Pick some, or none to use the whole cast.'),
+      nodes.push(box('Who is in this story?', h('p', { class: 'muted' }, 'Pick some, or none to use the whole cast.'),
         h('div', { class: 'chips' }, state.characters.map((c) => h('button', {
           class: 'chip' + (ui.selected.includes(c.id) ? ' on' : ''),
           onclick: () => { ui.selected = ui.selected.includes(c.id) ? ui.selected.filter((x) => x !== c.id) : [...ui.selected, c.id]; render(); },
-        }, c.name))));
+        }, c.name)))));
       const premise = h('textarea', { placeholder: 'Optional. Leave blank and the AI picks something that fits your world.', oninput: (e) => { ui.premise = e.target.value; } });
       premise.value = ui.premise;
       const length = h('select', { onchange: (e) => { ui.length = e.target.value; } },
@@ -694,10 +772,14 @@ const VIEWS = {
       const pov = h('select', { onchange: (e) => { ui.pov = e.target.value; } },
         h('option', { value: '' }, 'Narrator (third person)'),
         state.characters.filter((c) => castIds.includes(c.id)).map((c) => h('option', { value: c.id, selected: ui.pov === c.id }, `${c.name} (first person)`)));
-      nodes.push(...field('Premise or direction', premise), ...field('Length', length), ...field("Whose point of view?", pov), spiceControl(),
+      const spiceName = state.settings.mature ? (A.SPICE[state.settings.spice] || {}).label || 'Adult' : 'Off';
+      nodes.push(box('', ...field('Premise or direction', premise),
+        h('details', { open: ui.moreOpts, ontoggle: (e) => { ui.moreOpts = e.target.open; } },
+          h('summary', {}, `Story options · ${ui.length}, ${ui.pov ? charName(ui.pov) + "'s view" : 'narrator'}, spice ${spiceName}`),
+          ...field('Length', length), ...field('Whose point of view?', pov), spiceControl()),
         h('div', { class: 'row' },
           h('button', { class: 'btn', disabled: ui.busy, onclick: () => { ui.currentId = null; generate(); } }, '✨ Generate story'),
-          ui.busy && h('button', { class: 'btn ghost', onclick: () => ui.abort && ui.abort.abort() }, 'Stop')));
+          ui.busy && h('button', { class: 'btn ghost', onclick: () => ui.abort && ui.abort.abort() }, 'Stop'))));
     }
     nodes.push(h('div', { class: 'status', id: 'status' }, ui.status));
     if (story) {
@@ -761,7 +843,21 @@ const VIEWS = {
     const ai = w.ai = w.ai || { apiKey: '', model: '' };
     const aiBox = (key, attrs) => h('input', { ...attrs, value: ai[key], onchange: (e) => { ai[key] = e.target.value.trim(); save(); } });
     const open = (id) => { A.switchWorld(state, id); Object.assign(ui, { selected: [], pov: '', currentId: null, revision: null, reviseLog: [], status: '' }); save(); go('write'); };
-    return [h('h2', {}, `Worlds (${state.otherWorlds.length + 1})`),
+    if (ui.param === 'bible') {
+      return [backChip('World', () => go('world')), h('h2', {}, `📖 ${w.name}`),
+        h('p', { class: 'muted' }, 'This is the series bible. It grows automatically after every story, and every new story reads it. Edit freely.'),
+        box('', ...field('Name', name), ...field('Overview', overview)),
+        box('', ...listBox('lore', 'Lore'), ...listBox('places', 'Places')),
+        box('', ...listBox('relationships', 'Relationships'), ...listBox('timeline', 'Timeline')),
+        h('details', { class: 'box' }, h('summary', {}, 'AI key for this world (optional)'),
+          h('p', { class: 'muted' }, 'Leave blank to use the key and model from Settings. Stories never see other worlds either way; a separate key just keeps this world on its own account.'),
+          ...field('API key', aiBox('apiKey', { type: 'password', autocomplete: 'off', placeholder: 'Same as Settings' })),
+          ...field('Model', aiBox('model', { placeholder: state.settings.model })))];
+    }
+    return [h('h2', {}, `🌍 ${w.name}`),
+      menuCard('📖', 'Series bible', `Overview, lore, places, relationships and timeline (${w.lore.length + w.places.length + w.relationships.length + w.timeline.length} notes)`, () => go('world', 'bible')),
+      menuCard('🪄', 'Revise a fact', 'Change something in plain words and every character and story follows', () => go('revise')),
+      h('h2', {}, `Your worlds (${state.otherWorlds.length + 1})`),
       h('p', { class: 'muted' }, 'Each world keeps its own stories and notes, and stories only ever see the world they are written in. Characters can join any world from the Cast tab.'),
       h('div', { class: 'card setup' }, h('h3', {}, `✓ ${w.name}`), h('p', {}, `${state.stories.length} stories, ${state.characters.length} characters · open now`)),
       state.otherWorlds.map((x) => h('div', { class: 'card', onclick: () => open(x.world.id) }, h('h3', {}, x.world.name),
@@ -775,15 +871,7 @@ const VIEWS = {
         const n = prompt('Name the new world (or leave blank and Quick start names it):', '');
         if (n === null) return;
         A.newWorld(state, n.trim() || 'New World'); open(state.world.id);
-      } }, '+ New world')),
-      h('h2', {}, 'This world'),
-      h('p', { class: 'muted' }, 'This is the series bible. It grows automatically after every story, and every new story reads it. Edit freely.'),
-      ...field('Name', name), ...field('Overview', overview),
-      ...listBox('lore', 'Lore'), ...listBox('places', 'Places'), ...listBox('relationships', 'Relationships'), ...listBox('timeline', 'Timeline'),
-      h('details', {}, h('summary', {}, 'AI key for this world (optional)'),
-        h('p', { class: 'muted' }, 'Leave blank to use the key and model from Settings. Stories never see other worlds either way; a separate key just keeps this world on its own account.'),
-        ...field('API key', aiBox('apiKey', { type: 'password', autocomplete: 'off', placeholder: 'Same as Settings' })),
-        ...field('Model', aiBox('model', { placeholder: state.settings.model })))];
+      } }, '+ New world'))];
   },
 
   chat() {
@@ -797,7 +885,7 @@ const VIEWS = {
     const as = h('select', { onchange: (e) => { talk.as = e.target.value; talk.characterIds = [talk.with, talk.as].filter(Boolean); save(); render(); } },
       h('option', { value: '' }, 'Myself'), state.characters.filter((c) => c.id !== talk.with).map((c) => h('option', { value: c.id, selected: talk.as === c.id }, c.name)));
     const last = talk.messages[talk.messages.length - 1];
-    return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('characters', talk.with) }, `← ${name(talk.with, 'Cast')}`),
+    return [h('div', { class: 'row' }, backChip(name(talk.with, 'Cast'), () => go('characters', talk.with)),
       talk.messages.length > 0 && listenBtn(talk)),
       h('h2', {}, `💬 ${name(talk.with, 'Chat')}`),
       ...field('You are talking as', as),
@@ -814,7 +902,7 @@ const VIEWS = {
 
   revise() {
     const plan = ui.revision;
-    const nodes = [h('h2', {}, 'World revision'),
+    const nodes = [backChip('World', () => go('world')), h('h2', {}, '🪄 Revise a fact'),
       h('p', { class: 'muted' }, 'Change a fact in plain words. The AI updates every character, the world notes and every saved story to match, and future stories follow it. You see every change before anything is saved.')];
     if (!plan) {
       const box = h('textarea', { placeholder: 'e.g. "Ana has always had red hair, not black" or "The castle burned down last winter"', oninput: (e) => { ui.reviseText = e.target.value; } });
@@ -944,19 +1032,18 @@ const VIEWS = {
     };
     const section = SETTINGS.find(([id]) => id === ui.param);
     if (!section) {
-      return [h('h2', {}, 'Settings'), SETTINGS.map(([id, icon, title, hint]) => h('div', { class: 'card', onclick: () => go(id === 'help' ? 'help' : 'settings', id === 'help' ? null : id) },
-        h('h3', {}, `${icon} ${title}`), h('p', {}, hint)))];
+      return [h('h2', {}, 'Settings'), SETTINGS.map(([id, icon, title, hint]) => menuCard(icon, title, hint, () => go(id === 'help' ? 'help' : 'settings', id === 'help' ? null : id)))];
     }
-    return [h('button', { class: 'chip', onclick: () => go('settings') }, '‹ Settings'), h('h2', {}, `${section[1]} ${section[2]}`), sections[section[0]]()];
+    return [backChip('Settings', () => go('settings')), h('h2', {}, `${section[1]} ${section[2]}`), box('', sections[section[0]]())];
   },
 
   // Guides and known problems from help.js, so nobody needs a support team to get set up.
   help() {
-    const back = h('button', { class: 'chip', onclick: () => go(ui.param ? 'help' : 'settings') }, ui.param ? '‹ Help' : '‹ Settings');
+    const back = backChip(ui.param ? 'Help' : 'Settings', () => go(ui.param ? 'help' : 'settings'));
     const guide = HELP.guides.find((g) => g.id === ui.param);
-    if (guide) return [back, h('h2', {}, guide.title), helpBody(guide.body)];
+    if (guide) return [back, h('h2', {}, guide.title), box('', helpBody(guide.body))];
     return [back, h('h2', {}, '❓ Help & guides'),
-      h('h3', {}, 'Guides'), HELP.guides.map((g) => h('div', { class: 'card', onclick: () => go('help', g.id) }, h('h3', {}, g.title))),
+      h('h3', {}, 'Guides'), HELP.guides.map((g) => menuCard('📘', g.title, '', () => go('help', g.id))),
       h('h3', {}, 'Problems and fixes'),
       h('p', { class: 'muted' }, 'Errors people have run into before, and what fixes them.'),
       HELP.problems.map((x) => h('details', { class: 'help' }, h('summary', {}, x.q), helpBody(x.a)))];
@@ -1054,7 +1141,7 @@ function narrationSettings() {
   const paid = s.ttsKey && [
     ...field('Voice engine', h('select', { onchange: set('ttsModel') }, Object.entries(A.PREMIUM_VOICES).map(([id, m]) => h('option', { value: id, selected: s.ttsModel === id }, m.label)))),
     ...field('Narrator voice', h('select', { onchange: set('ttsNarrator') }, [...v.f, ...v.m].map((x) => h('option', { value: x, selected: x === premiumNarrator() }, `${x} (${v.f.includes(x) ? 'female' : 'male'})`))))];
-  return [h('h2', {}, 'Narration'),
+  return [
     h('p', { class: 'muted' }, 'Tap 🔊 Listen on any story to hear it read aloud. Each character speaks their lines in their own voice, picked to match them; change it on their page in the Cast tab.'),
     free, paid,
     ...field('Speed', h('select', { onchange: (e) => { s.rate = Number(e.target.value); save(); } },
@@ -1077,7 +1164,7 @@ function reviseLog(open) {
 
 function storyReader(story) {
   if (!story) return VIEWS.stories();
-  return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('stories') }, '← All stories')),
+  return [backChip('All stories', () => go('stories')),
     h('h2', {}, story.title),
     h('p', { class: 'muted' }, [fmtDate(story.createdAt), (story.characterIds || []).map(charName).filter(Boolean).join(', ')].filter(Boolean).join(' · ')),
     story.summary && h('p', { class: 'muted' }, story.summary),
@@ -1104,14 +1191,16 @@ function characterEditor(c) {
   dev.value = (draft.developments || []).join('\n');
   const idea = h('input', { placeholder: 'Optional idea, e.g. "grumpy dragon-tamer with a soft spot for strays"' });
   const status = h('div', { class: 'status' });
-  const aiFill = async (e) => {
-    e.target.disabled = true; status.textContent = 'Imagining…';
+  const aiFill = async () => {
+    const j = startJob('Imagining a character', ['Writing their name, looks, personality and background']);
+    if (!j) return;
+    j.step(0, idea.value.trim() ? `Based on "${idea.value.trim()}", fitted to ${state.world.name}.` : `Someone who fits ${state.world.name}.`);
     try {
-      const r = await chatJson(A.buildCharacterMessages(state, idea.value.trim()));
+      const r = await chatJson(A.buildCharacterMessages(state, idea.value.trim()), { signal: j.signal });
       for (const k of ['name', 'appearance', 'personality', 'background']) if (r[k]) inputs[k].value = r[k];
       status.textContent = 'Review and Save.';
-    } catch (err) { status.textContent = err.message; }
-    e.target.disabled = false;
+      j.end();
+    } catch (err) { j.end(err); }
   };
   const saveChar = async () => {
     const vals = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value.trim()]));
@@ -1129,13 +1218,20 @@ function characterEditor(c) {
   const hear = () => speak('voice', [{ text: `Hi, I'm ${inputs.name.value.trim() || 'new here'}.`, who: { ...draft, ...Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value])) } }]);
   const photo = h('input', { type: 'file', accept: 'image/*', style: 'display:none', onchange: async (e) => {
     const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-    status.textContent = 'Looking at the photo…';
+    const who = photoAi() ? 'Google Gemini' : `your AI (${state.settings.model})`;
+    const j = startJob('Describing from the photo', ['Shrinking the photo and removing its location data', `Asking ${who} how they look`, 'Filling in Appearance']);
+    if (!j) return;
     try {
-      const r = await chatJson(A.buildPhotoMessages(await shrinkImage(f)), { use: photoAi() });
+      j.step(0, 'The photo is made smaller on this device first, so it sends faster and carries no location or camera details.');
+      const img = await shrinkImage(f);
+      j.step(1, 'Only physical traits are described (hair, build, style), never who the person is. This usually takes 5 to 30 seconds.');
+      const r = await chatJson(A.buildPhotoMessages(img), { use: photoAi(), signal: j.signal });
       if (!r.appearance) throw new Error('No description came back. Try another photo.');
+      j.step(2);
       inputs.appearance.value = r.appearance;
       status.textContent = 'Appearance filled in. Review and Save. The photo itself is not kept.';
-    } catch (err) { status.textContent = err.message + (/image|vision|modalit/i.test(err.message) ? '\nThis model may not read photos. Add a free Gemini key under Settings → Photo AI.' : ''); }
+      j.end();
+    } catch (err) { j.end(/image|vision|modalit/i.test(err.message) ? new Error(err.message + '\nThis model may not read photos. Add a free Gemini key under Settings → Photo AI.') : err); }
   } });
   // Portrait: drawn free by AI Horde from the Appearance box, or the user's own picture. Stored on the character (on this device only).
   const face = h('img', { class: 'portrait', alt: '', hidden: !draft.portrait, src: draft.portrait || null });
@@ -1143,34 +1239,38 @@ function characterEditor(c) {
     draft.portrait = face.src = img || ''; face.hidden = !img;
     if (c) { c.portrait = draft.portrait; await save(); }
   };
-  const drawFace = async (e) => {
+  const drawFace = async () => {
     if (!canDraw()) { status.textContent = PRIVATE_PICTURES; return; }
-    e.target.disabled = true; status.textContent = state.settings.comfyUrl ? 'Drawing the portrait on your PC…' : 'Drawing the portrait. This is free and can take a minute or more…';
+    const name = inputs.name.value.trim();
+    const j = startJob(`Drawing ${name || 'the portrait'}`, [`Sending their look to ${artist()}`, 'Drawing the portrait']);
+    if (!j) return;
+    j.step(0, state.settings.comfyUrl ? 'Your PC usually takes a few seconds.' : 'AI Horde is free and run by volunteers, so this can take a minute or more. Only the Appearance box is sent, never their name or your stories.');
     try {
       await setFace(await drawImage(A.portraitPrompt({ ...draft, appearance: inputs.appearance.value.trim() }),
-        (q) => { if (q.queue_position || comfyNote) status.textContent = `Drawing the portrait${q.queue_position ? `, #${q.queue_position} in line` : ''}…${comfyNote}`; }, { width: 512, height: 512, nsfw: false }));
+        (q) => j.step(1, [`Drawing on ${artist()}.`, waitText(q), comfyNote.trim()].filter(Boolean).join('\n')), { width: 512, height: 512, nsfw: false, signal: j.signal }));
       status.textContent = c ? 'Portrait saved.' : 'Portrait ready. Tap Save to keep it.';
-    } catch (err) { status.textContent = err.message; }
-    e.target.disabled = false;
+      j.end();
+    } catch (err) { j.end(err); }
   };
   const own = h('input', { type: 'file', accept: 'image/*', style: 'display:none', onchange: async (e) => {
     const f = e.target.files[0]; e.target.value = ''; if (!f) return;
     try { await setFace(await shrinkImage(f, 512)); status.textContent = c ? 'Portrait saved.' : 'Tap Save to keep it.'; } catch (err) { status.textContent = 'Could not read that picture.'; }
   } });
   const appearsIn = c ? state.stories.filter((s) => (s.characterIds || []).includes(c.id)) : [];
-  return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('characters') }, '← Cast')),
+  return [backChip('Cast', () => go('characters')),
     h('h2', {}, c ? c.name : 'New character'),
-    !c && [idea, h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: aiFill }, '✨ Fill in with AI'))],
+    !c && box('✨ Let the AI fill it in', idea, h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: aiFill }, '✨ Fill in with AI'))),
     c && h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => startChat(c.id) }, `💬 Chat with ${c.name}`)),
-    face,
-    h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: drawFace }, '🎨 Draw portrait'),
-      h('button', { class: 'btn ghost', onclick: () => own.click() }, '🖼️ Use my own picture'), own,
-      h('button', { class: 'btn ghost', onclick: () => { setFace(''); status.textContent = c ? 'Portrait removed.' : ''; } }, 'Remove picture')),
-    ...mk('name', 'Name'), ...mk('appearance', 'Appearance', true),
-    h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => photo.click() }, '📷 Describe from a photo'), photo),
-    h('p', { class: 'muted' }, 'Fills in how they look (hair, build, style). Only physical traits are described, never who the person is. The photo is sent to your AI provider and not saved.'), ...mk('personality', 'Personality', true), ...mk('background', 'Background', true),
-    ...field('Story developments (added automatically, one per line)', dev),
-    voice && [...field('Voice when stories are read aloud', voice), h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: hear }, listenLabel('voice')))],
+    box('Portrait', face,
+      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: drawFace }, '🎨 Draw portrait'),
+        h('button', { class: 'btn ghost', onclick: () => own.click() }, '🖼️ Use my own picture'), own,
+        h('button', { class: 'btn ghost', onclick: () => { setFace(''); status.textContent = c ? 'Portrait removed.' : ''; } }, 'Remove picture'))),
+    box('Who they are', ...mk('name', 'Name'), ...mk('appearance', 'Appearance', true),
+      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => photo.click() }, '📷 Describe from a photo'), photo),
+      h('p', { class: 'muted' }, 'Fills in how they look (hair, build, style). Only physical traits are described, never who the person is. The photo is sent to your AI provider and not saved.'), ...mk('personality', 'Personality', true), ...mk('background', 'Background', true)),
+    h('details', { class: 'box' }, h('summary', {}, `Story developments (${(draft.developments || []).length})`),
+      ...field('Added automatically after each story, one per line', dev)),
+    voice && box('Voice', ...field('When stories are read aloud', voice), h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: hear }, listenLabel('voice')))),
     status,
     h('div', { class: 'row' }, h('button', { class: 'btn', onclick: saveChar }, 'Save'),
       c && h('button', { class: 'btn ghost', onclick: () => download(JSON.stringify(A.exportCharacter(c), null, 2), `${c.name.replace(/[^\w-]+/g, '-')}.json`) }, 'Export'),
