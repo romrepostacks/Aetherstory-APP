@@ -413,14 +413,17 @@
   function buildPanelMessages(state, story) {
     const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
     const system = 'You adapt prose into a vertical-scroll manhwa (webtoon). Reply with JSON only, no markdown.';
-    const user = `Characters: ${chars.map((c) => c.name).join(', ') || '(none named)'}\n\nStory "${story.title}":\n"""${story.text.slice(0, 24000)}"""\n\n` +
-      'Split it into 6 to 10 panels covering the key beats in order. Return JSON:\n' +
+    const n = panelCount(story.text);
+    const user = `Characters: ${chars.map((c) => c.name).join(', ') || '(none named)'}\n\nStory "${story.title}":\n"""${story.text.slice(0, 60000)}"""\n\n` +
+      `Split it into about ${n} panels that follow the whole story in order, start to finish, without skipping scenes. Return JSON:\n` +
       '{"panels": [{"scene": "what the illustrator draws: setting, action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
       '  "characters": ["names of the characters visible in this panel"], "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n' +
       'Use the exact character names above. Keep the text short; the pictures carry the story.' +
       (state.settings.mature ? ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully.' : '');
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
   }
+  // About one panel per 150 words, like a webtoon episode: a 3000-word story gets 20.
+  const panelCount = (text) => Math.min(40, Math.max(8, Math.round(String(text || '').split(/\s+/).length / 150)));
   const COMIC_STYLE = 'manhwa webtoon panel, full color digital art, clean line art, soft cel shading, cinematic lighting, detailed background';
   // The image model knows nothing about the cast, so each visible character's name becomes their written appearance.
   function panelPrompt(state, panel) {
@@ -429,7 +432,7 @@
     return [COMIC_STYLE, str(panel && panel.scene), looks].filter(Boolean).join('. ').slice(0, 1500);
   }
   function toPanels(state, r) {
-    return (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 12).map((p) => ({
+    return (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 50).map((p) => ({
       prompt: panelPrompt(state, p), caption: str(p.caption),
       dialogue: (Array.isArray(p.dialogue) ? p.dialogue : []).filter((d) => d && str(d.line)).map((d) => ({ name: str(d.name), line: str(d.line) })),
     }));
@@ -707,7 +710,7 @@
   const unseal = decryptWith;
 
   const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
-    memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelPrompt, toPanels,
+    memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, toPanels,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;

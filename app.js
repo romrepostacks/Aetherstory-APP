@@ -449,13 +449,18 @@ async function makeComic(story, replan) {
       story.panels = panels;
       await save(); if (here()) render();
     }
-    const n = story.panels.length;
-    for (const [i, p] of story.panels.entries()) {
-      if (p.img) continue;
-      setStatus(`Drawing panel ${i + 1} of ${n}…`);
-      p.img = await drawImage(p.prompt, (c) => setStatus(`Drawing panel ${i + 1} of ${n}… ${c.queue_position ? `#${c.queue_position} in line, ` : ''}about ${c.wait_time || 0}s left`));
-      await save(); if (here()) render();
-    }
+    // ponytail: 2 at a time, in story order; raise it if Horde lets anonymous users run more at once.
+    const todo = story.panels.filter((p) => !p.img), total = todo.length;
+    let done = 0;
+    const progress = (c) => setStatus(`Drawing panels: ${done} of ${total} done${c && c.queue_position ? `, #${c.queue_position} in line` : ''}…`);
+    progress();
+    await Promise.all([0, 1].map(async () => {
+      for (let p; (p = todo.shift());) {
+        try { p.img = await drawImage(p.prompt, progress); } catch (e) { todo.length = 0; throw e; } // the other one stops after its current panel
+        done++; progress();
+        await save(); if (here()) render();
+      }
+    }));
     ui.status = 'Comic ready.';
   } catch (e) { ui.status = e.message + ' Tap "Draw missing panels" to try again.'; }
   ui.drawing = null;

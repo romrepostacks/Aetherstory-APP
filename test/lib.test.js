@@ -370,3 +370,11 @@ test('comic panels swap names for written appearance in the image prompt', () =>
   assert.deepStrictEqual(panels[0].dialogue, [{ name: 'Ana', line: 'Wait.' }]);
   assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /Characters: Ana/);
 });
+
+test('comic panel count follows story length', () => {
+  const words = (n) => Array(n).fill('word').join(' ');
+  assert.strictEqual(A.panelCount(words(800)), 8);
+  assert.strictEqual(A.panelCount(words(3000)), 20);
+  assert.strictEqual(A.panelCount(words(20000)), 40);
+  assert.match(A.buildPanelMessages(A.emptyState(), { title: 'T', text: words(3000) })[1].content, /about 20 panels/);
+});
