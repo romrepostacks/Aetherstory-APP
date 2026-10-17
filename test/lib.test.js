@@ -386,3 +386,21 @@ test('portraitPrompt draws from appearance, never the name', () => {
   assert.doesNotMatch(p, /Ana/);
   assert.match(A.portraitPrompt({ name: 'Ben', personality: 'he is calm' }), /portrait/);
 });
+
+test('spice levels raise the heat in stories, chats and comic pictures, and do nothing with mature off', () => {
+  const s = A.emptyState();
+  s.characters = [{ id: 'a', name: 'Ana', appearance: '', personality: '', backstory: '', relationships: '', developments: [] }];
+  const sys = () => A.buildStoryMessages(s, { characterIds: ['a'] })[0].content;
+  assert.equal(s.settings.spice, 'adult');
+  const adult = sys();
+  assert.match(adult, /explicitly/);
+  assert.equal(A.spiceText(s.settings, 'image'), '');
+  s.settings.spice = 'nympho';
+  assert.ok(sys().length > adult.length && sys().includes(adult.match(/This is private[^\n]*?romance\./)[0]));
+  assert.match(A.spiceText(s.settings, 'image'), /nsfw/);
+  s.settings.spice = 'bogus';
+  assert.equal(sys(), adult);
+  s.settings.mature = false;
+  assert.equal(A.spiceText(s.settings, 'story'), '');
+  assert.equal(A.spiceText(s.settings, 'image'), '');
+});

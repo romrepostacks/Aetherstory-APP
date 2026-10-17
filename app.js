@@ -258,7 +258,7 @@ const dropWorldKeys = (data) => { for (const w of [data.world, ...data.otherWorl
 // ---------- backups: one tap, or written automatically to a file the user picked (PC browsers) ----------
 async function backupText() {
   const data = JSON.parse(JSON.stringify(state));
-  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; data.settings.hordeKey = ''; dropWorldKeys(data);
+  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; data.settings.hordeKey = ''; data.settings.comfyUrl = ''; dropWorldKeys(data);
   return JSON.stringify(await A.encryptBackup(data, await deviceKey()));
 }
 const backedUp = () => { state.settings.lastBackup = Date.now(); return save(); };
@@ -311,10 +311,11 @@ function render() {
   document.getElementById('worldName').textContent = state.world.name;
   const nav = document.getElementById('nav');
   const view = document.getElementById('view');
-  nav.hidden = !!ui.locked || !state.settings.ageOk;
+  nav.hidden = !!ui.locked || !state.settings.ageOk || !state.settings.setupDone;
   if (ui.locked) return view.replaceChildren(...lockScreen());
   if (!state.settings.ageOk) return view.replaceChildren(...ageGate());
-  nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: ui.view === v ? 'on' : '', onclick: () => go(v) }, h('span', {}, icon), label)));
+  if (!state.settings.setupDone) return view.replaceChildren(...[setupWizard()].flat(Infinity).filter((n) => n && n.nodeType));
+  nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: (ui.view === 'help' ? 'settings' : ui.view) === v ? 'on' : '', onclick: () => go(v) }, h('span', {}, icon), label)));
   view.replaceChildren(...[VIEWS[ui.view]()].flat(Infinity).filter((n) => n && n.nodeType));
 }
 
@@ -415,7 +416,64 @@ const HORDE = 'https://aihorde.net/api/v2';
 const ANIME_MODELS = ['Animagine XL', 'Hassaku XL', 'Nova Anime XL', 'AAM XL', 'Anything Diffusion', 'Anything v5', 'Counterfeit', 'Pastel Mix', 'Cetus-Mix', 'AnyLoRA'];
 const NEGATIVE = 'photorealistic, realistic, photo, photography, 3d, 3d render, cgi, octane render, unreal engine, doll, plastic skin, ' +
   'text, speech bubble, watermark, signature, lowres, blurry, deformed, extra fingers, bad anatomy';
+// Every picture goes through here: the user's own ComfyUI when set up, AI Horde otherwise (and as its backup outside Private mode).
+// Explicit pictures carry the Spice level's tags; portraits (nsfw: false) never do.
+const PRIVATE_PICTURES = 'Pictures are off in Private mode: AI Horde\'s volunteer computers would see the descriptions. Draw them on your own PC with ComfyUI instead (Settings → Help & guides).';
+const canDraw = () => !state.settings.privateOnly || !!state.settings.comfyUrl;
+let comfyNote = ''; // why the last picture went to Horde instead of the PC, shown with the progress
 async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature } = {}) {
+  const s = state.settings;
+  prompt = [prompt, nsfw && A.spiceText(s, 'image')].filter(Boolean).join(', ');
+  if (s.comfyUrl) {
+    try { const img = await drawComfy(prompt, onWait, { width, height, nsfw }); comfyNote = ''; return img; } catch (e) {
+      const why = comfyError(e);
+      if (s.privateOnly) throw new Error(why + ' Private mode is on, so AI Horde isn\'t used instead. See Settings → Help & guides.');
+      comfyNote = ` ${why} AI Horde is drawing instead.`;
+    }
+  } else if (s.privateOnly) throw new Error(PRIVATE_PICTURES);
+  return drawHorde(prompt, onWait, { width, height, nsfw });
+}
+
+// ---------- pictures on the user's own PC: ComfyUI started with --enable-cors-header (guide in help.js) ----------
+// fetch throws TypeError only when nothing answered (ComfyUI closed, wrong address, blocked by the browser).
+const comfyError = (e) => (e instanceof TypeError || e.name === 'TimeoutError' ? `Couldn't reach ComfyUI at ${state.settings.comfyUrl}.` : e.message);
+const comfyBase = () => state.settings.comfyUrl.trim().replace(/\/+$/, '');
+async function comfyModels() {
+  const res = await fetch(comfyBase() + '/object_info/CheckpointLoaderSimple', { signal: AbortSignal.timeout(15e3) });
+  if (!res.ok) throw new Error(`ComfyUI answered ${res.status}. Check the start file has --enable-cors-header (Help → ComfyUI answers 403).`);
+  const opt = (await res.json()).CheckpointLoaderSimple.input.required.ckpt_name;
+  return Array.isArray(opt[0]) ? opt[0] : (opt[1] && opt[1].options) || []; // older and newer ComfyUI list choices differently
+}
+async function drawComfy(prompt, onWait, { width, height, nsfw }) {
+  const model = state.settings.comfyModel || (await comfyModels())[0];
+  if (!model) throw new Error('ComfyUI has no model yet. Put an anime model in ComfyUI\'s models\\checkpoints folder and restart it.');
+  const k = Math.sqrt(1024 * 1024 / (width * height)), px = (x) => Math.round((x * k) / 64) * 64; // SDXL models draw best near one megapixel
+  const workflow = {
+    1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
+    2: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: `masterpiece, best quality, anime style, 2d illustration, ${prompt}` } },
+    3: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: NEGATIVE + (nsfw ? '' : ', nsfw, nude') } },
+    4: { class_type: 'EmptyLatentImage', inputs: { width: px(width), height: px(height), batch_size: 1 } },
+    5: { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0],
+      seed: Math.floor(Math.random() * 2 ** 32), steps: 20, cfg: 6, sampler_name: 'euler_ancestral', scheduler: 'normal', denoise: 1 } },
+    6: { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
+    7: { class_type: 'PreviewImage', inputs: { images: ['6', 0] } }, // ComfyUI's temp folder: nothing piles up in its output folder
+  };
+  const res = await fetch(comfyBase() + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }) });
+  const job = await res.json().catch(() => ({}));
+  if (!res.ok || !job.prompt_id) throw new Error(`ComfyUI refused the picture (${(job.error && job.error.message) || res.status}).`);
+  const started = Date.now();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const run = (await (await fetch(`${comfyBase()}/history/${job.prompt_id}`)).json())[job.prompt_id];
+    const img = run && Object.values(run.outputs || {}).flatMap((o) => o.images || [])[0];
+    if (img) return shrinkImage(await (await fetch(`${comfyBase()}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`)).blob());
+    if (run && run.status && run.status.status_str === 'error') throw new Error('ComfyUI hit an error drawing this picture; its window shows why.');
+    if (Date.now() - started > 5 * 60e3) throw new Error('ComfyUI took more than 5 minutes for one picture.');
+    if (onWait) onWait({});
+  }
+}
+
+async function drawHorde(prompt, onWait, { width, height, nsfw }) {
   const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-Tool' };
   const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt: `anime style, 2d illustration, ${prompt} ### ${NEGATIVE}`,
     params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw, censor_nsfw: false, r2: false, models: ANIME_MODELS }) });
@@ -442,7 +500,7 @@ async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!s
 // ponytail: images live in the library as JPEG data URLs (~60 KB each); move them to their own store if saves or backups get slow.
 async function makeComic(story, replan) {
   if (ui.drawing) return;
-  if (state.settings.privateOnly) return setStatus('Pictures are off in Private mode: they are drawn by volunteer computers that see the scene descriptions.');
+  if (!canDraw()) return setStatus(PRIVATE_PICTURES);
   const here = () => ui.view === 'stories' && ui.param === story.id;
   ui.drawing = story.id; ui.comic = true; render();
   try {
@@ -456,7 +514,7 @@ async function makeComic(story, replan) {
     // ponytail: 2 at a time, in story order; raise it if Horde lets anonymous users run more at once.
     const todo = story.panels.filter((p) => !p.img), total = todo.length;
     let done = 0;
-    const progress = (c) => setStatus(`Drawing panels: ${done} of ${total} done${c && c.queue_position ? `, #${c.queue_position} in line` : ''}…`);
+    const progress = (c) => setStatus(`Drawing panels: ${done} of ${total} done${c && c.queue_position ? `, #${c.queue_position} in line` : ''}…${comfyNote}`);
     progress();
     await Promise.all([0, 1].map(async () => {
       for (let p; (p = todo.shift());) {
@@ -560,7 +618,7 @@ const PRESETS = {
   'Ollama (this PC)': ['http://localhost:11434/v1', 'llama3.1'], 'LM Studio (this PC)': ['http://localhost:1234/v1', 'local-model'],
 };
 // Guided setup for someone who has never made an API key: three steps, one paste, then straight to writing.
-function keySetup() {
+function keySetup(onDone = () => { ui.status = 'You are all set!'; go('write'); }) {
   const key = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your key here' });
   const status = h('div', { class: 'status' });
   const start = async () => {
@@ -571,7 +629,7 @@ function keySetup() {
     await save();
     status.textContent = 'Checking your key…';
     try { await chat([{ role: 'user', content: 'Say hi.' }], { stream: false }); } catch (e) { status.textContent = 'That key did not work. Check you copied all of it. (' + e.message + ')'; return; }
-    ui.status = 'You are all set!'; go('write');
+    onDone();
   };
   return [h('ol', { class: 'steps' },
     h('li', {}, 'Open ', h('a', { href: 'https://openrouter.ai/keys', target: '_blank', rel: 'noopener' }, 'openrouter.ai/keys'), ' and sign in. Google sign-in works, and no card is needed.'),
@@ -636,7 +694,7 @@ const VIEWS = {
       const pov = h('select', { onchange: (e) => { ui.pov = e.target.value; } },
         h('option', { value: '' }, 'Narrator (third person)'),
         state.characters.filter((c) => castIds.includes(c.id)).map((c) => h('option', { value: c.id, selected: ui.pov === c.id }, `${c.name} (first person)`)));
-      nodes.push(...field('Premise or direction', premise), ...field('Length', length), ...field("Whose point of view?", pov),
+      nodes.push(...field('Premise or direction', premise), ...field('Length', length), ...field("Whose point of view?", pov), spiceControl(),
         h('div', { class: 'row' },
           h('button', { class: 'btn', disabled: ui.busy, onclick: () => { ui.currentId = null; generate(); } }, '✨ Generate story'),
           ui.busy && h('button', { class: 'btn ghost', onclick: () => ui.abort && ui.abort.abort() }, 'Stop')));
@@ -808,7 +866,7 @@ const VIEWS = {
       const data = A.normalizeState(raw);
       if (!confirm(`Replace your library with this backup (${data.otherWorlds.length + 1} worlds, ${data.stories.length + data.otherWorlds.reduce((n, x) => n + x.stories.length, 0)} stories)?`)) return;
       // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
-      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel', 'hordeKey']) data.settings[k] = s[k];
+      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel', 'hordeKey', 'comfyUrl', 'comfyModel']) data.settings[k] = s[k];
       data.settings.ageOk = true;
       dropWorldKeys(data);
       state = data; ui.pendingImport = null; await save(); render();
@@ -841,54 +899,149 @@ const VIEWS = {
     const style = h('textarea', { placeholder: 'e.g. slow-burn romance, second person, lots of banter, avoid gore' });
     bind('style', style);
     const isDefault = s.model === A.emptyState().settings.model;
-    return [h('h2', {}, 'AI setup'),
-      s.apiKey ? [h('p', { class: 'muted' }, '✓ Key saved. ' + (isDefault ? 'Stories are written by the free default AI (Nemotron).' : `Using ${s.model} (see Advanced mode).`)),
-        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test it'))]
-        : keySetup(),
-      h('details', { open: ui.advanced, ontoggle: (e) => { ui.advanced = e.target.open; } }, h('summary', {}, 'Advanced mode'),
-        h('p', { class: 'muted' }, 'Pick another model or any OpenAI-compatible service. Your key is stored only on this device.'),
-        ...field('Preset', preset), ...field('Base URL', base), ...field('API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
-        ...field('Model', model), ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 }))),
-        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection'))),
-      status,
-      h('h2', {}, 'Writing style'),
-      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.privateOnly, onchange: (e) => { s.privateOnly = e.target.checked; save(); }, style: 'width:auto' }), ' Private mode: only use AI providers that do not store or train on my stories'),
-      h('p', { class: 'muted' }, 'Your stories are sent to the AI to be written. Free models are often run by providers that may keep prompts; Private mode blocks those, so free models may stop working.'),
-      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
-      h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
-      ...field('Instructions applied to every story', style),
-      narrationSettings(),
-      h('h2', {}, 'Photo AI (optional, free)'),
-      h('p', { class: 'muted' }, s.photoKey ? '✓ On. "Describe from a photo" uses Google Gemini, which reads photos better than story models.'
-        : 'For the best results with "Describe from a photo" on the Cast tab, add a free Google Gemini key: open aistudio.google.com/apikey, sign in, tap Create API key, and paste it here. Without it, your main AI reads the photo.'),
-      h('p', { class: 'muted' }, 'Google\'s free tier may use what it is sent to improve its products, so with Private mode on, photos go to your main AI instead. Only the photo goes to Gemini, never your stories.'),
-      ...field('Gemini API key', bind('photoKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Gemini key' }))),
-      h('details', {}, h('summary', {}, 'Photo AI service and model'),
-        h('p', { class: 'muted' }, 'Any OpenAI-compatible service with a vision model works here.'),
-        ...field('Base URL', bind('photoBaseUrl', h('input', {}))), ...field('Model', bind('photoModel', h('input', {})))),
-      h('h2', {}, 'Pictures (free)'),
-      h('p', { class: 'muted' }, '"Make it a comic" on a story turns it into illustrated manhwa panels. They are drawn for free by AI Horde, a network of volunteer computers, so a picture can take a minute or more. ' +
-        (s.hordeKey ? '✓ Your Horde key is on, so your pictures skip ahead of anonymous ones.' : 'For shorter waits, register for free at aihorde.net/register and paste the API key it gives you here.')),
-      h('p', { class: 'muted' }, 'Only each panel\'s scene description and the characters\' looks are sent, never the story itself. Volunteers\' computers see those descriptions, so pictures are off in Private mode.'),
-      ...field('AI Horde API key (optional)', bind('hordeKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Horde key' }))),
-      h('h2', {}, 'App lock'),
-      lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
+    const sections = {
+      ai: () => [
+        s.apiKey ? [h('p', { class: 'muted' }, '✓ Key saved. ' + (isDefault ? 'Stories are written by the free default AI (Nemotron).' : `Using ${s.model} (see Advanced mode).`)),
+          h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test it'))]
+          : keySetup(),
+        status,
+        spiceControl(),
+        ...field('Instructions applied to every story', style),
+        h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.privateOnly, onchange: (e) => { s.privateOnly = e.target.checked; save(); }, style: 'width:auto' }), ' Private mode: only use AI providers that do not store or train on my stories'),
+        h('p', { class: 'muted' }, 'Your stories are sent to the AI to be written. Free models are often run by providers that may keep prompts; Private mode blocks those, so free models may stop working.'),
+        h('details', { open: ui.advanced, ontoggle: (e) => { ui.advanced = e.target.open; } }, h('summary', {}, 'Advanced mode'),
+          h('p', { class: 'muted' }, 'Pick another model or any OpenAI-compatible service. Your key is stored only on this device. Venice and Euryale (paid) follow the Spice level most reliably.'),
+          ...field('Preset', preset), ...field('Base URL', base), ...field('API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
+          ...field('Model', model), ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 }))),
+          h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection')))],
+      narration: () => narrationSettings(),
+      pictures: () => pictureSettings(bind),
+      photo: () => [
+        h('p', { class: 'muted' }, s.photoKey ? '✓ On. "Describe from a photo" uses Google Gemini, which reads photos better than story models.'
+          : 'For the best results with "Describe from a photo" on the Cast tab, add a free Google Gemini key: open aistudio.google.com/apikey, sign in, tap Create API key, and paste it here. Without it, your main AI reads the photo.'),
+        h('p', { class: 'muted' }, 'Google\'s free tier may use what it is sent to improve its products, so with Private mode on, photos go to your main AI instead. Only the photo goes to Gemini, never your stories.'),
+        ...field('Gemini API key', bind('photoKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Gemini key' }))),
+        h('details', {}, h('summary', {}, 'Photo AI service and model'),
+          h('p', { class: 'muted' }, 'Any OpenAI-compatible service with a vision model works here.'),
+          ...field('Base URL', bind('photoBaseUrl', h('input', {}))), ...field('Model', bind('photoModel', h('input', {}))))],
+      lock: () => lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
         h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => location.reload() }, 'Lock now'),
           h('button', { class: 'btn ghost', onclick: async () => { if (!confirm('Turn off the lock? Your library will be stored unencrypted on this device.')) return; await setLock(null); render(); } }, 'Turn off'))]
         : lockSetup(),
-      h('h2', {}, 'Library'),
-      h('p', { class: 'muted' }, `${state.otherWorlds.length + 1} worlds, ${totalStories()} stories, ${state.characters.length + state.library.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
-      h('p', {}, backupLine() + (ui.backupName ? ` Auto-backup is on: every story and chat is saved to ${ui.backupName}.` : '')),
-      canAutoBackup && h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: pickBackupFile }, ui.backupName ? 'Change auto-backup file' : 'Turn on auto-backup to a file'),
-        ui.backupName && h('button', { class: 'btn ghost', onclick: backupNow }, 'Back up now')),
-      canAutoBackup && h('p', { class: 'muted' }, 'Pick a file once (a synced folder like OneDrive or Google Drive keeps a copy off this PC too). If the browser asks again after a restart, tap Back up now.'),
-      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'),
-        h('button', { class: 'btn ghost', onclick: async () => download(await deviceKey(), 'aetherstory-key.txt') }, 'Download key'), file,
-        h('button', { class: 'btn danger', onclick: eraseAll }, 'Erase everything')),
-      h('p', { class: 'muted' }, 'Backups are encrypted (AES-256) with a key unique to this device. To open one on another device, or after clearing this browser, you also need this device\'s key file: download it once and keep it somewhere separate from your backups.'),
-      ui.pendingImport && unlockBox()];
+      library: () => [
+        h('p', { class: 'muted' }, `${state.otherWorlds.length + 1} worlds, ${totalStories()} stories, ${state.characters.length + state.library.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
+        h('p', {}, backupLine() + (ui.backupName ? ` Auto-backup is on: every story and chat is saved to ${ui.backupName}.` : '')),
+        canAutoBackup && h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: pickBackupFile }, ui.backupName ? 'Change auto-backup file' : 'Turn on auto-backup to a file'),
+          ui.backupName && h('button', { class: 'btn ghost', onclick: backupNow }, 'Back up now')),
+        canAutoBackup && h('p', { class: 'muted' }, 'Pick a file once (a synced folder like OneDrive or Google Drive keeps a copy off this PC too). If the browser asks again after a restart, tap Back up now.'),
+        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'),
+          h('button', { class: 'btn ghost', onclick: async () => download(await deviceKey(), 'aetherstory-key.txt') }, 'Download key'), file),
+        h('p', { class: 'muted' }, 'Backups are encrypted (AES-256) with a key unique to this device. To open one on another device, or after clearing this browser, you also need this device\'s key file: download it once and keep it somewhere separate from your backups.'),
+        ui.pendingImport && unlockBox(),
+        h('h3', {}, 'Start over'),
+        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => { s.setupDone = false; save(); render(); } }, 'Run first-time setup again'),
+          h('button', { class: 'btn danger', onclick: eraseAll }, 'Erase everything'))],
+    };
+    const section = SETTINGS.find(([id]) => id === ui.param);
+    if (!section) {
+      return [h('h2', {}, 'Settings'), SETTINGS.map(([id, icon, title, hint]) => h('div', { class: 'card', onclick: () => go(id === 'help' ? 'help' : 'settings', id === 'help' ? null : id) },
+        h('h3', {}, `${icon} ${title}`), h('p', {}, hint)))];
+    }
+    return [h('button', { class: 'chip', onclick: () => go('settings') }, '‹ Settings'), h('h2', {}, `${section[1]} ${section[2]}`), sections[section[0]]()];
+  },
+
+  // Guides and known problems from help.js, so nobody needs a support team to get set up.
+  help() {
+    const back = h('button', { class: 'chip', onclick: () => go(ui.param ? 'help' : 'settings') }, ui.param ? '‹ Help' : '‹ Settings');
+    const guide = HELP.guides.find((g) => g.id === ui.param);
+    if (guide) return [back, h('h2', {}, guide.title), helpBody(guide.body)];
+    return [back, h('h2', {}, '❓ Help & guides'),
+      h('h3', {}, 'Guides'), HELP.guides.map((g) => h('div', { class: 'card', onclick: () => go('help', g.id) }, h('h3', {}, g.title))),
+      h('h3', {}, 'Problems and fixes'),
+      h('p', { class: 'muted' }, 'Errors people have run into before, and what fixes them.'),
+      HELP.problems.map((x) => h('details', { class: 'help' }, h('summary', {}, x.q), helpBody(x.a)))];
   },
 };
+
+const SETTINGS = [['ai', '🤖', 'AI & writing', 'Your AI key, Spice, story instructions, Private mode'], ['narration', '🔊', 'Narration', 'Voices and reading speed'],
+  ['pictures', '🖼️', 'Pictures', 'Free AI Horde, or ComfyUI on your own PC'], ['photo', '📷', 'Photo AI', 'Describe characters from a photo'],
+  ['lock', '🔒', 'App lock', 'A passcode for this device'], ['library', '💾', 'Library & backups', 'Export, import, move to another device, start over'],
+  ['help', '❓', 'Help & guides', 'Step-by-step setup guides and fixes for common problems']];
+
+// help.js text: `backticks` become copyable code, {ORIGIN} this app's address (what ComfyUI must let in), arrays numbered steps.
+const richText = (t) => String(t).replaceAll('{ORIGIN}', location.origin).split('`').map((part, i) => (i % 2 ? h('code', {}, part) : part));
+const helpBody = (body) => body.map((b) => (Array.isArray(b) ? h('ol', { class: 'steps help' }, b.map((x) => h('li', {}, richText(x)))) : h('p', { class: 'help' }, richText(b))));
+
+// Spice: Off (no explicit scenes) plus lib's three levels. Off is the old Mature checkbox turned off.
+const SPICE_STEPS = [['off', 'Off', 'No explicit scenes.'], ...Object.entries(A.SPICE).map(([k, v]) => [k, v.label, v.hint])];
+function spiceControl() {
+  const s = state.settings;
+  const at = s.mature ? Math.max(1, SPICE_STEPS.findIndex(([k]) => k === s.spice)) : 0;
+  const note = h('p', { class: 'muted' });
+  const show = (i) => { note.textContent = `${SPICE_STEPS[i][1]}: ${SPICE_STEPS[i][2]}`; };
+  show(at);
+  return [h('label', {}, 'Spice (stories, chats and comic pictures)'),
+    h('input', { type: 'range', class: 'spice', min: 0, max: SPICE_STEPS.length - 1, step: 1, value: at, 'aria-label': 'Spice level', oninput: (e) => show(+e.target.value),
+      onchange: (e) => { const i = +e.target.value; s.mature = i > 0; if (i) s.spice = SPICE_STEPS[i][0]; save(); } }),
+    h('div', { class: 'ticks' }, SPICE_STEPS.map(([, label]) => h('span', {}, label))), note];
+}
+
+function pictureSettings(bind) {
+  const s = state.settings;
+  const models = h('select', { onchange: (e) => { s.comfyModel = e.target.value; save(); } },
+    h('option', { value: s.comfyModel }, s.comfyModel || 'Tap Test to list your models'));
+  const msg = h('div', { class: 'status' });
+  const testComfy = async () => {
+    if (!s.comfyUrl) { msg.textContent = 'Type your ComfyUI address first.'; return; }
+    msg.textContent = 'Checking…';
+    try {
+      const list = await comfyModels();
+      if (!list.length) throw new Error('ComfyUI has no model yet. Put an anime model in its models\\checkpoints folder and restart it.');
+      if (!list.includes(s.comfyModel)) { s.comfyModel = list[0]; save(); }
+      models.replaceChildren(...list.map((m) => h('option', { value: m, selected: m === s.comfyModel }, m)));
+      msg.textContent = `✓ Connected. Pictures will be drawn on your PC with ${s.comfyModel}.`;
+    } catch (e) { msg.textContent = comfyError(e) + ' See Help & guides → Problems and fixes.'; }
+  };
+  return [
+    h('p', { class: 'muted' }, '"Make it a comic" on a story turns it into illustrated manhwa panels, and "Draw portrait" on a character draws them. Every picture is 2D anime art.'),
+    h('h3', {}, 'AI Horde (free, works anywhere)'),
+    h('p', { class: 'muted' }, 'Volunteer computers draw your pictures, so each one can take a minute or more. ' +
+      (s.hordeKey ? '✓ Your Horde key is on, so your pictures skip ahead of anonymous ones.' : 'For shorter waits, register for free at aihorde.net/register and paste the API key it gives you here.')),
+    h('p', { class: 'muted' }, 'Only each panel\'s scene description and the characters\' looks are sent, never the story itself. Volunteers\' computers see those descriptions, so AI Horde is off in Private mode.'),
+    ...field('AI Horde API key (optional)', bind('hordeKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Horde key' }))),
+    h('h3', {}, 'ComfyUI on your PC (seconds per picture)'),
+    h('p', { class: 'muted' }, s.comfyUrl ? 'Pictures are drawn on your PC first. When it can\'t be reached, AI Horde draws instead (except in Private mode). Nothing is sent anywhere else.'
+      : 'A Windows PC with an NVIDIA graphics card can draw pictures in seconds, free and private. Leave this empty to use AI Horde only.'),
+    h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('help', 'comfy') }, 'Set-up guide'), h('button', { class: 'btn ghost', onclick: () => go('help', 'phone') }, 'Use it from your phone')),
+    ...field('ComfyUI address', bind('comfyUrl', h('input', { type: 'url', autocomplete: 'off', placeholder: 'http://127.0.0.1:8189' }))),
+    ...field('Model', models),
+    h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: testComfy }, 'Test')), msg];
+}
+
+// First run, after the age gate: key, spice, pictures, lock. Every step can be skipped and changed later in Settings.
+function setupWizard() {
+  const s = state.settings, step = ui.setupStep || 0;
+  const next = () => { ui.setupStep = step + 1; render(); window.scrollTo(0, 0); };
+  const finish = async () => { s.setupDone = true; ui.setupStep = 0; await save(); go('write'); };
+  const bind = (key, el) => { el.value = s[key]; el.addEventListener('change', () => { s[key] = el.value.trim(); save(); }); return el; };
+  const steps = [
+    () => [h('h2', {}, 'Step 1 of 4: your free AI key'),
+      s.apiKey ? h('p', {}, '✓ Your key is already saved.') : [h('p', {}, 'Stories are written by an AI using your own free key. It takes about two minutes and costs nothing.'), keySetup(next)]],
+    () => [h('h2', {}, 'Step 2 of 4: how spicy?'), h('p', { class: 'muted' }, 'This sets how explicit stories, chats and comic pictures are. You can change it any time on the Write tab.'), spiceControl()],
+    () => [h('h2', {}, 'Step 3 of 4: pictures'),
+      h('p', {}, 'Comics and portraits are drawn for free by AI Horde volunteers, which can take a minute or more per picture. For shorter waits, register free at aihorde.net/register and paste your key (optional).'),
+      ...field('AI Horde API key (optional)', bind('hordeKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Horde key' }))),
+      h('p', { class: 'muted' }, 'Have a Windows PC with an NVIDIA graphics card? It can draw pictures in seconds. The guide is in Settings → Help & guides whenever you want it.')],
+    () => [h('h2', {}, 'Step 4 of 4: lock the app (optional)'),
+      lockKey ? h('p', {}, '✓ App lock is on.') : lockSetup()],
+  ];
+  const last = step === steps.length - 1;
+  return [h('p', { class: 'muted' }, 'Welcome! A few quick choices, then you\'re writing. Everything here can be changed later in Settings.'),
+    steps[step](),
+    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: last ? finish : next }, last ? 'Start writing' : 'Next'),
+      step > 0 && h('button', { class: 'btn ghost', onclick: () => { ui.setupStep = step - 1; render(); } }, 'Back'),
+      !last && h('button', { class: 'btn ghost', onclick: finish }, 'Skip setup'))];
+}
 
 function narrationSettings() {
   const s = state.settings;
@@ -991,11 +1144,11 @@ function characterEditor(c) {
     if (c) { c.portrait = draft.portrait; await save(); }
   };
   const drawFace = async (e) => {
-    if (state.settings.privateOnly) { status.textContent = 'Pictures are off in Private mode: they are drawn by volunteer computers that see the appearance description.'; return; }
-    e.target.disabled = true; status.textContent = 'Drawing the portrait. This is free and can take a minute or more…';
+    if (!canDraw()) { status.textContent = PRIVATE_PICTURES; return; }
+    e.target.disabled = true; status.textContent = state.settings.comfyUrl ? 'Drawing the portrait on your PC…' : 'Drawing the portrait. This is free and can take a minute or more…';
     try {
       await setFace(await drawImage(A.portraitPrompt({ ...draft, appearance: inputs.appearance.value.trim() }),
-        (q) => { if (q.queue_position) status.textContent = `Drawing the portrait, #${q.queue_position} in line…`; }, { width: 512, height: 512, nsfw: false }));
+        (q) => { if (q.queue_position || comfyNote) status.textContent = `Drawing the portrait${q.queue_position ? `, #${q.queue_position} in line` : ''}…${comfyNote}`; }, { width: 512, height: 512, nsfw: false }));
       status.textContent = c ? 'Portrait saved.' : 'Portrait ready. Tap Save to keep it.';
     } catch (err) { status.textContent = err.message; }
     e.target.disabled = false;
