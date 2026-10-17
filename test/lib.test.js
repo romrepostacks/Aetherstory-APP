@@ -325,3 +325,56 @@ test('photo prompt sends the image and asks for physical traits only', () => {
   assert.strictEqual(m.content[1].image_url.url, 'data:image/jpeg;base64,xx');
   assert.match(m.content[0].text, /Do not identify the person/);
 });
+
+test('long-term memory condenses only what outgrew the prompt, and archives the originals', () => {
+  const s = A.emptyState();
+  s.world.lore = Array.from({ length: 45 }, (_, i) => `fact ${i}`);
+  s.world.places = ['Port: a harbor'];
+  s.characters.push({ id: 'a', name: 'Ana', developments: Array.from({ length: 14 }, (_, i) => `dev ${i}`) });
+  const plan = A.memoryPlan(s);
+  assert.deepStrictEqual(Object.keys(plan.world), ['lore']);
+  assert.strictEqual(plan.world.lore.length, 30);
+  assert.strictEqual(plan.chars[0].old.length, 8);
+  assert.match(A.buildMemoryMessages(s, plan)[1].content, /fact 0/);
+  const done = A.applyMemory(s, plan, { world: { lore: ['old facts, condensed'] }, characters: { Ana: 'Her early years.' } });
+  assert.deepStrictEqual(done, ['lore', 'Ana']);
+  assert.strictEqual(s.world.lore.length, 16);
+  assert.strictEqual(s.world.lore[0], 'old facts, condensed');
+  assert.strictEqual(s.world.lore[1], 'fact 30');
+  assert.strictEqual(s.characters[0].developments.length, 7);
+  assert.strictEqual(s.characters[0].developments[0], 'Earlier: Her early years.');
+  assert.strictEqual(s.world.archive.lore.length, 30);
+  assert.strictEqual(s.world.archive.developments[0], 'Ana: dev 0');
+  assert.strictEqual(A.memoryPlan(s), null);
+});
+
+test('long-term memory leaves a list alone if it changed while the AI was condensing', () => {
+  const s = A.emptyState();
+  s.world.lore = Array.from({ length: 45 }, (_, i) => `fact ${i}`);
+  const plan = A.memoryPlan(s);
+  s.world.lore[0] = 'revised fact';
+  assert.deepStrictEqual(A.applyMemory(s, plan, { world: { lore: ['x'] } }), []);
+  assert.strictEqual(s.world.lore.length, 45);
+});
+
+test('comic panels swap names for written appearance in the image prompt', () => {
+  const s = A.emptyState();
+  s.characters.push({ id: 'a', name: 'Ana', appearance: 'tall, red braid, green coat' });
+  const panels = A.toPanels(s, { panels: [
+    { scene: 'Ana on a rainy pier at night', characters: ['ana', 'Nobody'], caption: 'Later.', dialogue: [{ name: 'Ana', line: 'Wait.' }, { name: 'x', line: '' }] },
+    { scene: '' },
+  ] });
+  assert.strictEqual(panels.length, 1);
+  assert.match(panels[0].prompt, /manhwa/);
+  assert.match(panels[0].prompt, /Ana: tall, red braid, green coat/);
+  assert.deepStrictEqual(panels[0].dialogue, [{ name: 'Ana', line: 'Wait.' }]);
+  assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /Characters: Ana/);
+});
+
+test('comic panel count follows story length', () => {
+  const words = (n) => Array(n).fill('word').join(' ');
+  assert.strictEqual(A.panelCount(words(800)), 8);
+  assert.strictEqual(A.panelCount(words(3000)), 20);
+  assert.strictEqual(A.panelCount(words(20000)), 40);
+  assert.match(A.buildPanelMessages(A.emptyState(), { title: 'T', text: words(3000) })[1].content, /about 20 panels/);
+});

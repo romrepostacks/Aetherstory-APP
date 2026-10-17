@@ -19,6 +19,8 @@ This file is the living record of how the app protects its users. **Every change
 | Auto-backup file handle (PC browsers) | Its own IndexedDB record, outside the library | Only a pointer to a file the user picked; the browser asks again for permission to write after a restart. Not sealed by App lock (it holds no story data). Erase everything removes it. |
 | Photos for "Describe from a photo" | Nowhere. Shrunk to a 768px JPEG in memory, sent once, then dropped | Redrawing on a canvas strips location and camera data before sending. |
 | Premium narration audio (Venice) | IndexedDB, one record per spoken passage | Plain audio of story text, so only written while App lock is off. Erase everything deletes it. |
+| Comic panels (pictures, captions, dialogue) | On the story in the library record, so sealed by App lock and included in backups | Pictures are re-encoded to JPEG on a canvas before saving. |
+| Long-term memory archive (`world.archive`) | In the library record, so sealed by App lock and included in backups | The original world notes and developments that were condensed. Never sent to the AI. |
 
 There is no server, account system, analytics, telemetry, crash reporting or third-party script. The app is static files on GitHub Pages.
 
@@ -32,8 +34,10 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 4. **Premium voices (opt-in)**: when the user pastes a Venice API key under Settings → Narration, each story they tap Listen on is sent, in full, to `api.venice.ai` to be turned into speech. Venice says it does not store prompts. The key is stored like the AI key (sealed by App lock, never written into backups, never taken from an imported backup). The returned audio is cached in IndexedDB so replays are free; that cache is **not encrypted**, so while App lock is on it is kept in memory only. Erase everything deletes it.
 5. **Chats** (💬 Chat on a character) go to the same AI provider as stories, with the same world notes and character sheets. *Add this chat to my world* sends the chat text for the world update, like a story.
 6. **Photos (opt-in, one at a time):** *Describe from a photo* sends a shrunk copy of the chosen photo to the main AI, or, if the user pasted a Google Gemini key under Settings → Photo AI, to `generativelanguage.googleapis.com`. The prompt asks for physical traits only and forbids identifying the person. Google's free tier may use inputs to improve its products, so with **Private mode** on photos always go to the main AI instead. The Gemini key is stored like the other keys (sealed by App lock, never written into backups, never taken from an imported backup).
-7. **Loading the app** from GitHub Pages. GitHub sees the visitor's IP address like any web host. No story data is involved.
-8. Nothing else. The Content Security Policy blocks scripts from anywhere but the app itself.
+7. **Comic pictures (on tap, per story):** *Make it a comic* first sends the story to the main AI (like a world update) to plan the panels. Each panel is then drawn by **AI Horde** (`aihorde.net`), a free network of volunteer-run computers: it receives that panel's scene description and the written appearance of the characters in it, never the story text or the user's AI key. Volunteer workers see those prompts and could keep them, so pictures are refused while **Private mode** is on. Without a key the app uses Horde's public anonymous key; an optional free Horde key (Settings → Pictures) is stored like the other keys (sealed by App lock, never written into backups, never taken from an imported backup).
+8. **Long-term memory** condenses the oldest world notes and character developments by sending them to the main AI, which has already seen them.
+9. **Loading the app** from GitHub Pages. GitHub sees the visitor's IP address like any web host. No story data is involved.
+10. Nothing else. The Content Security Policy blocks scripts from anywhere but the app itself.
 
 ## Protections in place
 

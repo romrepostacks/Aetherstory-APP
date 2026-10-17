@@ -24,6 +24,7 @@
         photoKey: '',
         photoBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
         photoModel: 'gemini-flash-latest',
+        hordeKey: '', // optional free AI Horde key: pictures come back sooner than anonymous ones
       },
       characters: [],
       stories: [],
@@ -362,6 +363,81 @@
     return changes;
   }
 
+  // ---------- long-term memory: when a list outgrows what prompts show, its oldest entries are condensed so nothing silently drops out ----------
+  // Prompts show the newest 40 world entries and 12 developments. Past that, the oldest get merged into a few dense entries.
+  // The originals go to world.archive, which is never sent to the AI, so nothing is lost.
+  const MEMORY = { world: 40, worldKeep: 15, dev: 12, devKeep: 6 };
+  function memoryPlan(state) {
+    const w = state.world, plan = { world: {}, chars: [] };
+    for (const k of WORLD_LISTS) {
+      const list = k === 'relationships' ? currentRelationships(w[k]) : w[k] || [];
+      if (list.length > MEMORY.world) plan.world[k] = (w[k] || []).slice(0, w[k].length - MEMORY.worldKeep);
+    }
+    for (const c of state.characters) {
+      const d = c.developments || [];
+      if (d.length > MEMORY.dev) plan.chars.push({ id: c.id, name: c.name, old: d.slice(0, d.length - MEMORY.devKeep) });
+    }
+    return Object.keys(plan.world).length || plan.chars.length ? plan : null;
+  }
+  function buildMemoryMessages(state, plan) {
+    const system = 'You maintain the long-term memory of a fiction series. Reply with JSON only, no markdown.';
+    const user = `World: ${state.world.name}\n\nThese are the OLDEST entries of the series bible. Condense them so the important facts survive in far fewer words.\n\n` +
+      Object.entries(plan.world).map(([k, items]) => `${k}:\n- ${items.join('\n- ')}`).join('\n\n') +
+      (plan.chars.length ? '\n\nOldest developments per character:\n' + plan.chars.map((c) => `${c.name}:\n- ${c.old.join('\n- ')}`).join('\n') : '') +
+      '\n\nReturn JSON: {"world": {"<list name>": ["at most 10 dense entries"]}, "characters": {"<name>": "2-3 sentences covering everything important"}}\n' +
+      'Only include the lists and characters given above. Keep names, places, promises, secrets and turning points; drop repetition. Relationships keep the "A & B: state" form; timeline keeps events in order.';
+    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+  }
+  // Replaces each condensed span, but only if it's still the start of its list (a Revise may have changed it meanwhile).
+  function applyMemory(state, plan, r) {
+    const w = state.world, arch = (w.archive = w.archive || {}), out = [];
+    const startsWith = (list, old) => old.every((x, i) => list[i] === x);
+    for (const [k, old] of Object.entries(plan.world)) {
+      const items = strList(r && r.world && r.world[k]).slice(0, 10);
+      if (!items.length || !startsWith(w[k], old)) continue;
+      w[k].splice(0, old.length, ...items);
+      (arch[k] = arch[k] || []).push(...old);
+      out.push(k);
+    }
+    for (const p of plan.chars) {
+      const c = state.characters.find((x) => x.id === p.id), sum = str(((r && r.characters) || {})[p.name]);
+      if (!c || !sum || !startsWith(c.developments || [], p.old)) continue;
+      c.developments.splice(0, p.old.length, 'Earlier: ' + sum);
+      (arch.developments = arch.developments || []).push(...p.old.map((d) => `${c.name}: ${d}`));
+      out.push(c.name);
+    }
+    return out;
+  }
+
+  // ---------- comic: a story as manhwa-style panels, each drawn from a scene description plus how its characters look ----------
+  function buildPanelMessages(state, story) {
+    const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
+    const system = 'You adapt prose into a vertical-scroll manhwa (webtoon). Reply with JSON only, no markdown.';
+    const n = panelCount(story.text);
+    const user = `Characters: ${chars.map((c) => c.name).join(', ') || '(none named)'}\n\nStory "${story.title}":\n"""${story.text.slice(0, 60000)}"""\n\n` +
+      `Split it into about ${n} panels that follow the whole story in order, start to finish, without skipping scenes. Return JSON:\n` +
+      '{"panels": [{"scene": "what the illustrator draws: setting, action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
+      '  "characters": ["names of the characters visible in this panel"], "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n' +
+      'Use the exact character names above. Keep the text short; the pictures carry the story.' +
+      (state.settings.mature ? ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully.' : '');
+    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+  }
+  // About one panel per 150 words, like a webtoon episode: a 3000-word story gets 20.
+  const panelCount = (text) => Math.min(40, Math.max(8, Math.round(String(text || '').split(/\s+/).length / 150)));
+  const COMIC_STYLE = 'manhwa webtoon panel, full color digital art, clean line art, soft cel shading, cinematic lighting, detailed background';
+  // The image model knows nothing about the cast, so each visible character's name becomes their written appearance.
+  function panelPrompt(state, panel) {
+    const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
+    const looks = who.map((c) => `${c.name}: ${c.appearance || 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person')}`).join('. ');
+    return [COMIC_STYLE, str(panel && panel.scene), looks].filter(Boolean).join('. ').slice(0, 1500);
+  }
+  function toPanels(state, r) {
+    return (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 50).map((p) => ({
+      prompt: panelPrompt(state, p), caption: str(p.caption),
+      dialogue: (Array.isArray(p.dialogue) ? p.dialogue : []).filter((d) => d && str(d.line)).map((d) => ({ name: str(d.name), line: str(d.line) })),
+    }));
+  }
+
   // ---------- world revision: one plain-words change, applied to the cast, the bible and every saved story ----------
   const SHEET = ['appearance', 'personality', 'background'];
   const WORLD_LISTS = ['lore', 'places', 'relationships', 'timeline'];
@@ -634,6 +710,7 @@
   const unseal = decryptWith;
 
   const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
+    memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, toPanels,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
