@@ -258,7 +258,7 @@ const dropWorldKeys = (data) => { for (const w of [data.world, ...data.otherWorl
 // ---------- backups: one tap, or written automatically to a file the user picked (PC browsers) ----------
 async function backupText() {
   const data = JSON.parse(JSON.stringify(state));
-  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; data.settings.hordeKey = ''; dropWorldKeys(data);
+  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; data.settings.hordeKey = ''; data.settings.fastImageUrl = ''; dropWorldKeys(data);
   return JSON.stringify(await A.encryptBackup(data, await deviceKey()));
 }
 const backedUp = () => { state.settings.lastBackup = Date.now(); return save(); };
@@ -415,7 +415,37 @@ const HORDE = 'https://aihorde.net/api/v2';
 const ANIME_MODELS = ['Animagine XL', 'Hassaku XL', 'Nova Anime XL', 'AAM XL', 'Anything Diffusion', 'Anything v5', 'Counterfeit', 'Pastel Mix', 'Cetus-Mix', 'AnyLoRA'];
 const NEGATIVE = 'photorealistic, realistic, photo, photography, 3d, 3d render, cgi, octane render, unreal engine, doll, plastic skin, ' +
   'text, speech bubble, watermark, signature, lowres, blurry, deformed, extra fingers, bad anatomy';
-async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature } = {}) {
+// Fast pictures: the user's own free Cloudflare worker (FLUX.1 schnell, a few seconds each, about 170 a day free). Horde stays the fallback.
+// The worker only answers this app's web address, so a leaked link can't be used from other sites.
+const FAST_WORKER = `export default {
+  async fetch(req, env) {
+    const origin = req.headers.get('Origin') || '';
+    if (origin !== 'https://romrepostacks.github.io') return new Response('Forbidden', { status: 403 });
+    const cors = { 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'POST' };
+    if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
+    try {
+      const { prompt } = await req.json();
+      const { image } = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', { prompt: String(prompt).slice(0, 2000), steps: 4 });
+      return Response.json({ image }, { headers: cors });
+    } catch (e) {
+      return Response.json({ error: String(e.message || e) }, { status: 500, headers: cors });
+    }
+  }
+};`;
+async function drawFast(prompt) {
+  const res = await fetch(state.settings.fastImageUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(60e3),
+    body: JSON.stringify({ prompt: `2D anime manhwa illustration, flat cel shading, clean line art, not photorealistic, not 3D render. ${prompt}` }) });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || !j.image) throw new Error(j.error || `Fast pictures failed (${res.status}).`);
+  return shrinkImage(new Blob([Uint8Array.from(atob(j.image), (ch) => ch.charCodeAt(0))], { type: 'image/jpeg' }));
+}
+async function drawImage(prompt, onWait, opts) {
+  if (state.settings.fastImageUrl) {
+    try { return await drawFast(prompt); } catch (e) { console.warn('Fast pictures failed, using AI Horde:', e); } // e.g. the daily free allowance ran out
+  }
+  return drawHorde(prompt, onWait, opts);
+}
+async function drawHorde(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature } = {}) {
   const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-Tool' };
   const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt: `anime style, 2d illustration, ${prompt} ### ${NEGATIVE}`,
     params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw, censor_nsfw: false, r2: false, models: ANIME_MODELS }) });
@@ -808,7 +838,7 @@ const VIEWS = {
       const data = A.normalizeState(raw);
       if (!confirm(`Replace your library with this backup (${data.otherWorlds.length + 1} worlds, ${data.stories.length + data.otherWorlds.reduce((n, x) => n + x.stories.length, 0)} stories)?`)) return;
       // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
-      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel', 'hordeKey']) data.settings[k] = s[k];
+      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel', 'hordeKey', 'fastImageUrl']) data.settings[k] = s[k];
       data.settings.ageOk = true;
       dropWorldKeys(data);
       state = data; ui.pendingImport = null; await save(); render();
@@ -871,6 +901,16 @@ const VIEWS = {
         (s.hordeKey ? '✓ Your Horde key is on, so your pictures skip ahead of anonymous ones.' : 'For shorter waits, register for free at aihorde.net/register and paste the API key it gives you here.')),
       h('p', { class: 'muted' }, 'Only each panel\'s scene description and the characters\' looks are sent, never the story itself. Volunteers\' computers see those descriptions, so pictures are off in Private mode.'),
       ...field('AI Horde API key (optional)', bind('hordeKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Horde key' }))),
+      h('details', { open: !s.fastImageUrl }, h('summary', {}, s.fastImageUrl ? '✓ Fast pictures are on' : 'Fast pictures (a few seconds each, free, one-time setup)'),
+        h('p', { class: 'muted' }, 'Draws each picture in seconds on your own free Cloudflare account (about 170 pictures a day, no card needed). If it fails or the day\'s allowance runs out, AI Horde takes over. Very explicit panels may come out tamer than with Horde.'),
+        h('ol', { class: 'muted' },
+          h('li', {}, 'Sign up free at dash.cloudflare.com.'),
+          h('li', {}, 'Open Workers & Pages, tap Create, pick "Start with Hello World", and Deploy.'),
+          h('li', {}, 'Tap Edit code, delete what is there, paste the code from the button below, and Deploy.'),
+          h('li', {}, 'In the worker\'s Settings, under Bindings, tap Add, choose Workers AI, name it AI, and save.'),
+          h('li', {}, 'Copy the worker\'s address (it ends in workers.dev) and paste it below.')),
+        h('button', { class: 'btn ghost', onclick: (e) => navigator.clipboard.writeText(FAST_WORKER).then(() => { e.target.textContent = 'Copied ✓'; }) }, 'Copy worker code'),
+        ...field('Worker address', bind('fastImageUrl', h('input', { type: 'url', autocomplete: 'off', placeholder: 'https://….workers.dev' })))),
       h('h2', {}, 'App lock'),
       lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
         h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => location.reload() }, 'Lock now'),

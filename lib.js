@@ -25,6 +25,7 @@
         photoBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
         photoModel: 'gemini-flash-latest',
         hordeKey: '', // optional free AI Horde key: pictures come back sooner than anonymous ones
+        fastImageUrl: '', // the user's own Cloudflare worker for fast pictures (app.js FAST_WORKER); empty = AI Horde only
       },
       characters: [],
       stories: [],
