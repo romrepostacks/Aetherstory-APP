@@ -25,6 +25,10 @@
         photoBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
         photoModel: 'gemini-flash-latest',
         hordeKey: '', // optional free AI Horde key: pictures come back sooner than anonymous ones
+        spice: 'adult', // how explicit stories and pictures get while mature is on: adult | kinky | nympho (SPICE)
+        comfyUrl: '', // the user's own ComfyUI (e.g. http://127.0.0.1:8189): pictures drawn on their PC, AI Horde as backup
+        comfyModel: '', // checkpoint file in that ComfyUI; empty = the first one it lists
+        setupDone: false, // first-run setup finished or skipped
       },
       characters: [],
       stories: [],
@@ -182,6 +186,23 @@
       .slice(-limit);
   }
 
+  // Spice: how explicit things get while Mature content is on. Adult is how stories were written before the levels existed.
+  const ADULT_STORY = 'This is private adult fiction for a consenting adult reader. Sexual content is wanted: when the story calls for it, write it explicitly and in vivid detail instead of fading to black or softening it into a sweet romance.';
+  const ADULT_CHAT = 'This is private adult fiction for a consenting adult. Sexual content is allowed when the conversation goes there; write it explicitly rather than deflecting.';
+  const ADULT_PANELS = ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully.';
+  const SPICE = {
+    adult: { label: 'Adult', hint: 'Explicit when the story calls for it.', story: ADULT_STORY, chat: ADULT_CHAT, panels: ADULT_PANELS, image: '' },
+    kinky: { label: 'Kinky', hint: 'More heat, more often, with kinks and dirty talk.',
+      story: ADULT_STORY + ' Turn the heat up: build sexual tension from the first scene, include at least one explicit sex scene, and lean into kinks and dirty talk that fit the characters (dominance and submission, teasing, toys, roleplay, risky places). All characters are consenting adults.',
+      chat: ADULT_CHAT + ' Be flirtatious and forward, and steer toward sex and kinks that fit you.',
+      panels: ADULT_PANELS + ' Show the sexual tension and intimate scenes on the page instead of cutting away.', image: 'sensual, erotic, suggestive' },
+    nympho: { label: 'Nympho', hint: 'Sex is the heart of every story.',
+      story: ADULT_STORY + ' Make sex the heart of the story: the characters are insatiable and can barely keep their hands off each other, scenes turn sexual quickly and often, with several long, graphic encounters and filthy dialogue throughout. All characters are consenting adults.',
+      chat: ADULT_CHAT + ' You are insatiable: be openly sexual, start things yourself and escalate eagerly.',
+      panels: ADULT_PANELS + ' Draw the intimate scenes explicitly and give them several panels.', image: 'explicit, nsfw, erotic' },
+  };
+  const spiceText = (settings, kind) => (settings.mature ? (SPICE[settings.spice] || SPICE.adult)[kind] : '');
+
   function buildStoryMessages(state, { characterIds = [], premise = '', length = 'medium', continueStory = null, pov = '' }) {
     const chars = state.characters.filter((c) => characterIds.includes(c.id));
     const past = relatedStories(state, characterIds, continueStory && continueStory.id);
@@ -189,7 +210,7 @@
       'You are a skilled fiction author writing an ongoing series set in one shared world.',
       'Keep characters, places and past events consistent with the series bible below. Build on earlier stories naturally (callbacks, evolving relationships) without recapping them.',
       'Write vivid prose with dialogue. Output only the story text: no preface, no notes, no title line.',
-      state.settings.mature ? 'This is private adult fiction for a consenting adult reader. Sexual content is wanted: when the story calls for it, write it explicitly and in vivid detail instead of fading to black or softening it into a sweet romance.' : '',
+      spiceText(state.settings, 'story'),
       state.settings.style ? `Author guidelines from the reader: ${state.settings.style}` : '',
       '\n## Series bible\n' + describeWorld(state.world),
       chars.length ? '\n## Characters in this story\n' + chars.map(describeCharacter).join('\n\n') : '',
@@ -280,7 +301,7 @@
     const system = [
       `You are ${c.name}, a character in an ongoing fiction series, chatting with ${me ? me.name : 'the reader'}. Stay in character at all times and never mention being an AI.`,
       'Reply as ' + c.name + ' only: speech, with actions in *asterisks*. Keep replies to a few short paragraphs and let the other person lead.',
-      state.settings.mature ? 'This is private adult fiction for a consenting adult. Sexual content is allowed when the conversation goes there; write it explicitly rather than deflecting.' : '',
+      spiceText(state.settings, 'chat'),
       state.settings.style ? `Guidelines from the reader: ${state.settings.style}` : '',
       '\n## Series bible\n' + describeWorld(state.world),
       '\n## You\n' + describeCharacter(c),
@@ -419,7 +440,7 @@
       '{"panels": [{"scene": "what the illustrator draws: setting, action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
       '  "characters": ["names of the characters visible in this panel"], "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n' +
       'Use the exact character names above. Keep the text short; the pictures carry the story.' +
-      (state.settings.mature ? ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully.' : '');
+      spiceText(state.settings, 'panels');
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
   }
   // About one panel per 150 words, like a webtoon episode: a 3000-word story gets 20.
@@ -716,7 +737,7 @@
   const unseal = decryptWith;
 
   const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
-    memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, portraitPrompt, toPanels,
+    SPICE, spiceText, memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, portraitPrompt, toPanels,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;

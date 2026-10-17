@@ -74,6 +74,11 @@
   .bubble { white-space: pre-wrap; line-height: 1.5; padding: 10px 12px; border-radius: 12px; margin: 8px 0; border: 1px solid var(--line); }
   .bubble.user { background: #3a2b55; margin-left: 12%; }
   .bubble.assistant { background: var(--panel); margin-right: 12%; }
+  input[type=range].spice { padding: 0; border: 0; background: none; accent-color: var(--accent); }
+  .ticks { display: flex; justify-content: space-between; color: var(--muted); font: 0.8rem system-ui, sans-serif; }
+  code { background: #2a2440; border-radius: 5px; padding: 1px 5px; font: 0.88em ui-monospace, Consolas, monospace; word-break: break-all; user-select: all; }
+  p.help, .help li { font: 0.95rem/1.55 system-ui, sans-serif; white-space: pre-line; }
+  details.help summary { color: var(--text); margin-top: 12px; }
   ul.dev { margin: 6px 0; padding-left: 18px; color: var(--muted); font: 0.9rem/1.5 system-ui, sans-serif; }
 </style>
 </head>
@@ -82,6 +87,7 @@
 <main id="view"></main>
 <nav id="nav"></nav>
 <script src="lib.js"></script>
+<script src="help.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
