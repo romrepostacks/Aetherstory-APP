@@ -42,7 +42,8 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 
 ## Protections in place
 
-- **App lock (encryption at rest):** an optional passcode (minimum 6 characters) derives an AES-256-GCM key with PBKDF2-SHA256 (600,000 iterations, random 128-bit salt). While the lock is on, the library, API key and device backup key are stored only in sealed form, with a fresh IV on every save. Someone who opens the app, or copies the browser's files, gets ciphertext. The app locks after 5 minutes in the background or on *Lock now*, which reloads the page and drops the key and library from memory. A forgotten passcode can't be recovered, so the lock screen offers *erase everything* and restoring from a backup.
+- **App lock (encryption at rest):** a 6-digit PIN, typed on an in-app keypad (locks made before 2026-10-17 keep their typed passcode until changed), derives an AES-256-GCM key with PBKDF2-SHA256 (600,000 iterations, random 128-bit salt). Obvious PINs (one repeated digit, a run like 123456) are refused. While the lock is on, the library, API key and device backup key are stored only in sealed form, with a fresh IV on every save. Someone who opens the app, or copies the browser's files, gets ciphertext. The app locks after the time picked in Settings → App lock (right away to 1 hour, 5 minutes unless changed) in the background, or on *Lock now*, which reloads the page and drops the key, PIN and library from memory. A forgotten PIN can't be recovered, so the lock screen offers *erase everything* and restoring from a backup. Trade-off: a 6-digit PIN has 1,000,000 combinations, so someone who copies the browser's files and has serious computing power could try them all offline; the PBKDF2 cost slows that but does not stop it. The device's own passcode and encryption remain the first line of defence.
+- **Face ID unlock (opt-in):** a platform passkey with the WebAuthn PRF extension (`userVerification: required`). The PIN is stored in IndexedDB (`faceId`) encrypted with AES-256-GCM under the 32-byte PRF output, which the authenticator only releases after a face or fingerprint check, so the stored record alone doesn't reveal the PIN. Changing the PIN re-seals it (one more Face ID check); turning the lock off deletes the record. The passkey may sync through the user's iCloud Keychain like any passkey. `lockStyle` (whether the lock uses a PIN) is stored unsealed and reveals nothing else.
 - **Encrypted backups:** AES-256-GCM through WebCrypto, with a random 256-bit key per device and a fresh 96-bit IV per export. A backup from another device needs that device's key file (`aetherstory-key.txt`). The API key is never exported.
 - **Backups that happen on their own:** the app asks the browser for persistent storage (`navigator.storage.persist()`) so the library isn't evicted when space runs low. On PC browsers the user can pick a backup file once and every story and chat rewrites it (same encryption as Export). On phones, the Write tab shows a reminder when the last backup is a week old or there has never been one.
 - **Imports can't hijack the AI key:** importing a backup never changes this device's AI address, key, model or Private mode. A crafted backup therefore can't send this device's key to a server the attacker controls.
@@ -77,9 +78,8 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 ## Roadmap (next protections, in priority order)
 
 1. **Turn App lock on by default** during first-run setup, once it has been used for a while.
-2. **Change passcode** without turning the lock off and on.
-3. **Pin GitHub Actions to commit SHAs** and enable branch protection on `main`.
-4. **Self-host or reconsider public hosting.** A private repository removes all public history, but Pages on a private repo needs a paid GitHub plan.
+2. **Pin GitHub Actions to commit SHAs** and enable branch protection on `main`.
+3. **Self-host or reconsider public hosting.** A private repository removes all public history, but Pages on a private repo needs a paid GitHub plan.
 
 ## Owner checklist (things only the repo owner can do)
 
