@@ -20,7 +20,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - run: mkdir _site && cp index.html app.js lib.js sw.js manifest.json icon.svg icon-192.png icon-512.png _site/
+      - run: mkdir _site && cp index.html app.js lib.js help.js sw.js manifest.json icon.svg icon-192.png icon-512.png _site/
       - uses: actions/upload-pages-artifact@v3
       - id: deployment
         uses: actions/deploy-pages@v4
