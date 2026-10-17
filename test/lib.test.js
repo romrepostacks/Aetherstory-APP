@@ -365,7 +365,7 @@ test('comic panels swap names for written appearance in the image prompt', () =>
     { scene: '' },
   ] });
   assert.strictEqual(panels.length, 1);
-  assert.match(panels[0].prompt, /manhwa/);
+  assert.match(panels[0].prompt, /anime manhwa/);
   assert.match(panels[0].prompt, /Ana: tall, red braid, green coat/);
   assert.deepStrictEqual(panels[0].dialogue, [{ name: 'Ana', line: 'Wait.' }]);
   assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /Characters: Ana/);
@@ -382,6 +382,7 @@ test('comic panel count follows story length', () => {
 test('portraitPrompt draws from appearance, never the name', () => {
   const p = A.portraitPrompt({ name: 'Ana', appearance: 'short silver hair, green eyes' });
   assert.match(p, /silver hair/);
+  assert.match(p, /anime/);
   assert.doesNotMatch(p, /Ana/);
   assert.match(A.portraitPrompt({ name: 'Ben', personality: 'he is calm' }), /portrait/);
 });

@@ -410,11 +410,15 @@ async function condenseMemory() {
 
 // ---------- pictures: AI Horde, free volunteer-run image generation (anonymous works; a free key gets them sooner) ----------
 const HORDE = 'https://aihorde.net/api/v2';
-const NEGATIVE = 'text, speech bubble, watermark, signature, lowres, blurry, deformed, extra fingers, bad anatomy';
+// Every picture is 2D anime/manhwa art, never realistic or 3D: anime-trained models only, plus the style in the prompt and its opposite in the negative.
+// ponytail: fixed list from the Horde model reference; if pictures start failing with "no artist free", add whichever anime models have workers now.
+const ANIME_MODELS = ['Animagine XL', 'Hassaku XL', 'Nova Anime XL', 'AAM XL', 'Anything Diffusion', 'Anything v5', 'Counterfeit', 'Pastel Mix', 'Cetus-Mix', 'AnyLoRA'];
+const NEGATIVE = 'photorealistic, realistic, photo, photography, 3d, 3d render, cgi, octane render, unreal engine, doll, plastic skin, ' +
+  'text, speech bubble, watermark, signature, lowres, blurry, deformed, extra fingers, bad anatomy';
 async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature } = {}) {
   const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-Tool' };
-  const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt: `${prompt} ### ${NEGATIVE}`,
-    params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw, censor_nsfw: false, r2: false, models: [] }) });
+  const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt: `anime style, 2d illustration, ${prompt} ### ${NEGATIVE}`,
+    params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw, censor_nsfw: false, r2: false, models: ANIME_MODELS }) });
   const job = await res.json().catch(() => ({}));
   if (!res.ok || !job.id) throw new Error(`The picture request failed (${res.status}). ${job.message || ''}`);
   const started = Date.now();
