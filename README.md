@@ -28,7 +28,7 @@ After each story the app asks the AI what changed and updates the world, the cha
 
 **Chat** with any character from their Cast page. They know the world and everything that happened in your stories. Pick who you're talking as (yourself or another character). Chats are saved with your stories; tap *Add this chat to my world* and it updates the world notes and characters like a story does.
 
-**Describe from a photo** on a character's page fills in their appearance (hair, build, style) from a picture. Only physical traits are described, never who the person is, and the photo isn't kept. For the best results, paste an OpenAI API key under *Settings → Photo AI* (from platform.openai.com/api-keys, well under 1¢ a photo); otherwise the default free model reads it.
+**Describe from a photo** on a character's page fills in their appearance (hair, build, style) from a picture. Only physical traits are described, never who the person is, and the photo isn't kept. For the best results, paste a free Google Gemini key under *Settings → Photo AI* (from aistudio.google.com/apikey); otherwise the default free model reads it.
 
 **Backups:** the app asks the browser to keep its data permanently, and reminds you on the Write tab when your last backup is a week old. On a PC, *Settings → Turn on auto-backup to a file* writes a fresh backup after every story and chat; pick a file in a synced folder (OneDrive, Google Drive) to keep a copy off the device.
 

@@ -109,8 +109,9 @@ async function chatOnce(messages, { onToken, signal, stream = true, use } = {}) 
 async function chatJson(messages, opts) {
   return A.parseJsonLoose(await chat(messages, { stream: false, ...opts }));
 }
-// Photos go to a separate vision AI (OpenAI by default) when its key is set; otherwise the main AI reads them.
-const photoAi = () => { const s = state.settings; return s.photoKey ? { apiKey: s.photoKey, baseUrl: s.photoBaseUrl, model: s.photoModel } : undefined; };
+// Photos can go to a separate free vision AI (Google Gemini by default) when its key is set; otherwise the main AI reads them.
+// Gemini's free tier may keep what it's sent, so Private mode keeps photos on the main AI.
+const photoAi = () => { const s = state.settings; return s.photoKey && !s.privateOnly ? { apiKey: s.photoKey, baseUrl: s.photoBaseUrl, model: s.photoModel } : undefined; };
 
 // ---------- narration: the browser's own voices, free with no setup ----------
 const canSpeak = 'speechSynthesis' in window;
@@ -776,11 +777,11 @@ const VIEWS = {
       h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
       ...field('Instructions applied to every story', style),
       narrationSettings(),
-      h('h2', {}, 'Photo AI (optional)'),
-      h('p', { class: 'muted' }, s.photoKey ? '✓ On. "Describe from a photo" uses OpenAI, which reads photos better than story models.'
-        : 'For the best results with "Describe from a photo" on the Cast tab, add an OpenAI API key: open platform.openai.com/api-keys, tap Create new secret key, and paste it here. It costs well under 1¢ a photo. Without it, your main AI reads the photo.'),
-      h('p', { class: 'muted' }, 'Only the photo goes to OpenAI, never your stories. OpenAI does not train on API data and deletes it after 30 days.'),
-      ...field('OpenAI API key', bind('photoKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
+      h('h2', {}, 'Photo AI (optional, free)'),
+      h('p', { class: 'muted' }, s.photoKey ? '✓ On. "Describe from a photo" uses Google Gemini, which reads photos better than story models.'
+        : 'For the best results with "Describe from a photo" on the Cast tab, add a free Google Gemini key: open aistudio.google.com/apikey, sign in, tap Create API key, and paste it here. Without it, your main AI reads the photo.'),
+      h('p', { class: 'muted' }, 'Google\'s free tier may use what it is sent to improve its products, so with Private mode on, photos go to your main AI instead. Only the photo goes to Gemini, never your stories.'),
+      ...field('Gemini API key', bind('photoKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Gemini key' }))),
       h('details', {}, h('summary', {}, 'Photo AI service and model'),
         h('p', { class: 'muted' }, 'Any OpenAI-compatible service with a vision model works here.'),
         ...field('Base URL', bind('photoBaseUrl', h('input', {}))), ...field('Model', bind('photoModel', h('input', {})))),
@@ -888,7 +889,7 @@ function characterEditor(c) {
       if (!r.appearance) throw new Error('No description came back. Try another photo.');
       inputs.appearance.value = r.appearance;
       status.textContent = 'Appearance filled in. Review and Save. The photo itself is not kept.';
-    } catch (err) { status.textContent = err.message + (/image|vision|modalit/i.test(err.message) ? '\nThis model may not read photos. Add an OpenAI key under Settings → Photo AI.' : ''); }
+    } catch (err) { status.textContent = err.message + (/image|vision|modalit/i.test(err.message) ? '\nThis model may not read photos. Add a free Gemini key under Settings → Photo AI.' : ''); }
   } });
   const appearsIn = c ? state.stories.filter((s) => (s.characterIds || []).includes(c.id)) : [];
   return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('characters') }, '← Cast')),
