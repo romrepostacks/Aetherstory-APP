@@ -66,10 +66,10 @@ async function chat(messages, opts = {}) {
     }
   }
 }
-async function chatOnce(messages, { onToken, signal, stream = true } = {}) {
-  // A world can use its own key and model, so its stories run on a separate account.
+async function chatOnce(messages, { onToken, signal, stream = true, use } = {}) {
+  // A world can use its own key and model, so its stories run on a separate account. `use` swaps the provider entirely (the photo AI).
   const ai = state.world.ai || {};
-  const s = { ...state.settings, ...(ai.apiKey ? { apiKey: ai.apiKey } : {}), ...(ai.model ? { model: ai.model } : {}) };
+  const s = { ...state.settings, ...(ai.apiKey ? { apiKey: ai.apiKey } : {}), ...(ai.model ? { model: ai.model } : {}), ...use };
   if (!s.baseUrl || !s.model) throw new Error('Set an AI provider and model in Settings first.');
   const headers = { 'Content-Type': 'application/json' };
   if (s.apiKey) headers.Authorization = 'Bearer ' + s.apiKey;
@@ -106,9 +106,12 @@ async function chatOnce(messages, { onToken, signal, stream = true } = {}) {
   return full;
 }
 
-async function chatJson(messages) {
-  return A.parseJsonLoose(await chat(messages, { stream: false }));
+async function chatJson(messages, opts) {
+  return A.parseJsonLoose(await chat(messages, { stream: false, ...opts }));
 }
+// Photos can go to a separate free vision AI (Google Gemini by default) when its key is set; otherwise the main AI reads them.
+// Gemini's free tier may keep what it's sent, so Private mode keeps photos on the main AI.
+const photoAi = () => { const s = state.settings; return s.photoKey && !s.privateOnly ? { apiKey: s.photoKey, baseUrl: s.photoBaseUrl, model: s.photoModel } : undefined; };
 
 // ---------- narration: the browser's own voices, free with no setup ----------
 const canSpeak = 'speechSynthesis' in window;
@@ -252,16 +255,57 @@ const download = (text, name) => {
 };
 // Per-world keys never travel in a backup, in either direction.
 const dropWorldKeys = (data) => { for (const w of [data.world, ...data.otherWorlds.map((x) => x.world)]) w.ai = { apiKey: '', model: w.ai ? w.ai.model || '' : '' }; };
+// ---------- backups: one tap, or written automatically to a file the user picked (PC browsers) ----------
+async function backupText() {
+  const data = JSON.parse(JSON.stringify(state));
+  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; dropWorldKeys(data);
+  return JSON.stringify(await A.encryptBackup(data, await deviceKey()));
+}
+const backedUp = () => { state.settings.lastBackup = Date.now(); return save(); };
+async function exportLib() {
+  download(await backupText(), `aetherstory-${new Date().toISOString().slice(0, 10)}.json`);
+  await backedUp(); render();
+}
+const canAutoBackup = 'showSaveFilePicker' in window;
+const backupFile = () => kv('backupFile').catch(() => null); // a file handle, not library data, so it isn't sealed by App lock
+async function pickBackupFile() {
+  let fh;
+  try { fh = await showSaveFilePicker({ suggestedName: 'aetherstory-backup.json', types: [{ description: 'Aetherstory backup', accept: { 'application/json': ['.json'] } }] }); } catch (e) { return; } // cancelled
+  await kv('backupFile', fh); ui.backupName = fh.name;
+  await autoBackup(fh); render();
+}
+// Rewrites the picked file. Skips quietly when there's no file or the browser wants permission again (that needs a tap: backupNow).
+async function autoBackup(fh) {
+  fh = fh || await backupFile();
+  if (!fh || (await fh.queryPermission({ mode: 'readwrite' })) !== 'granted') return false;
+  const w = await fh.createWritable();
+  await w.write(await backupText()); await w.close();
+  await backedUp();
+  return true;
+}
+async function backupNow() {
+  const fh = canAutoBackup && await backupFile();
+  if (!(fh && (await fh.requestPermission({ mode: 'readwrite' })) === 'granted' && await autoBackup(fh))) await exportLib();
+  render();
+}
+const totalStories = () => state.stories.length + state.otherWorlds.reduce((n, x) => n + x.stories.length, 0);
+const backupAge = () => (state.settings.lastBackup ? Math.floor((Date.now() - state.settings.lastBackup) / 864e5) : null);
+const backupDue = () => totalStories() > 0 && (backupAge() === null || backupAge() >= 7);
+const backupLine = () => (state.settings.lastBackup ? `Last backed up ${fmtDate(state.settings.lastBackup)}.` : 'Never backed up.');
+
 const field = (label, input) => [h('label', {}, label), input];
 const fmtDate = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null, reviseText: '', revision: null, reviseLog: [] };
+const ui = { draft: '', backupName: '', locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null, reviseText: '', revision: null, reviseLog: [] };
+const openStory = (s) => go(s.chat ? 'chat' : 'stories', s.id);
 const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['revise', '🪄', 'Revise'], ['settings', '⚙️', 'Settings']];
 
-function go(view, param = null) { ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
+function go(view, param = null) {
+  state.stories = state.stories.filter((s) => !s.chat || s.messages.length || s.id === param); // a chat nobody wrote in isn't kept
+  ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
 
 function render() {
   document.getElementById('worldName').textContent = state.world.name;
@@ -306,7 +350,59 @@ async function generate(continueId) {
   } catch (e) {
     setStatus('Story saved, but the world update failed: ' + e.message);
   }
+  await autoBackup().catch(() => {});
   finish();
+}
+
+// ---------- chat with a character ----------
+function startChat(id) {
+  const talk = { id: A.uid(), chat: true, with: id, as: '', characterIds: [id], messages: [], title: `Chat with ${charName(id)}`, summary: '', text: '', createdAt: Date.now() };
+  state.stories.push(talk);
+  ui.draft = ''; ui.status = '';
+  go('chat', talk.id);
+}
+async function sendChat(talk, text) {
+  if (ui.busy || !text) return;
+  talk.messages.push({ role: 'user', content: text });
+  const messages = A.buildChatMessages(state, talk);
+  const reply = { role: 'assistant', content: '' };
+  talk.messages.push(reply);
+  Object.assign(ui, { draft: '', busy: true, abort: new AbortController(), status: '' });
+  render();
+  try {
+    await chat(messages, { signal: ui.abort.signal, onToken: (t) => { reply.content += t; const el = document.getElementById('reply'); if (el) el.textContent = reply.content; } });
+  } catch (e) {
+    if (e.name !== 'AbortError' || !reply.content) { talk.messages.splice(-2); ui.draft = text; if (e.name !== 'AbortError') ui.status = e.message; }
+  }
+  reply.content = reply.content.trim();
+  talk.text = A.chatText(state, talk);
+  talk.updatedAt = Date.now();
+  await save();
+  finish();
+  const log = document.getElementById('box'); if (log) log.focus();
+}
+// Like after a story: the world, the characters' developments and the summary pick up what happened.
+async function endChat(talk) {
+  ui.busy = true; render(); setStatus('Updating your world from this chat…');
+  try {
+    const changes = A.applyWorldUpdate(state, talk, await chatJson(A.buildWorldUpdateMessages(state, talk)));
+    talk.worldAt = talk.messages.length;
+    await save();
+    setStatus(changes.length ? 'World updated: ' + changes.join(', ') : 'Saved. Nothing new for the world this time.');
+  } catch (e) { setStatus('The world update failed: ' + e.message); }
+  await autoBackup().catch(() => {});
+  finish();
+}
+const choiceRow = (story) => (story.choices || []).length > 0 && [h('h3', {}, 'What happens next?'),
+  h('div', { class: 'chips' }, story.choices.map((c) => h('button', { class: 'chip', disabled: ui.busy, onclick: () => { ui.premise = c; generate(story.id); ui.premise = ''; } }, c)))];
+
+// Photos go to the AI as a small JPEG: quicker, and redrawing drops the location and camera data photos carry.
+async function shrinkImage(file, max = 768) {
+  const img = await createImageBitmap(file);
+  const k = Math.min(1, max / Math.max(img.width, img.height));
+  const cv = h('canvas', { width: Math.round(img.width * k), height: Math.round(img.height * k) });
+  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  return cv.toDataURL('image/jpeg', 0.85);
 }
 function finish() { ui.busy = false; ui.abort = null; const s = ui.status; render(); setStatus(s); }
 
@@ -434,6 +530,11 @@ const VIEWS = {
       nodes.push(h('div', { class: 'card setup' }, h('h3', {}, 'First, get your free AI key'),
         h('p', {}, 'It takes about two minutes and costs nothing. You only do this once.'), keySetup()));
     }
+    if (backupDue() && !ui.busy) {
+      nodes.push(h('div', { class: 'card setup' }, h('h3', {}, '💾 Back up your stories'),
+        h('p', {}, `${backupLine()} Your library only lives in this browser, and phones can clear it. A backup keeps it safe.`),
+        h('div', { class: 'row' }, h('button', { class: 'btn', onclick: backupNow }, 'Back up now'))));
+    }
     if (!state.characters.length) {
       const vibe = h('input', { placeholder: 'Optional: a one-line vibe, e.g. "rival witches in a rainy port city"' });
       nodes.push(h('h2', {}, 'Quick start'),
@@ -462,7 +563,7 @@ const VIEWS = {
     nodes.push(h('div', { class: 'status', id: 'status' }, ui.status));
     if (story) {
       nodes.push(h('h2', {}, story.title), h('div', { class: 'prose', id: 'output' }, story.text));
-      if (!ui.busy) nodes.push(h('div', { class: 'row' },
+      if (!ui.busy) nodes.push(choiceRow(story), h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: () => generate(story.id) }, 'Continue story'),
         listenBtn(story),
         h('button', { class: 'btn ghost', onclick: () => { ui.currentId = null; ui.premise = ''; ui.status = ''; render(); } }, 'New story')),
@@ -475,8 +576,8 @@ const VIEWS = {
     if (ui.param) return storyReader(state.stories.find((s) => s.id === ui.param));
     const list = [...state.stories].sort((a, b) => b.createdAt - a.createdAt);
     if (!list.length) return [h('h2', {}, 'Stories'), h('div', { class: 'empty' }, 'No stories yet. Generate one from the Write tab.')];
-    return [h('h2', {}, `Stories (${list.length})`), list.map((s) => h('div', { class: 'card', onclick: () => go('stories', s.id) },
-      h('h3', {}, s.title),
+    return [h('h2', {}, `Stories (${list.length})`), list.map((s) => h('div', { class: 'card', onclick: () => openStory(s) },
+      h('h3', {}, (s.chat ? '💬 ' : '') + s.title),
       h('p', {}, [fmtDate(s.createdAt), (s.characterIds || []).map(charName).filter(Boolean).join(', ')].filter(Boolean).join(' · ')),
       s.summary && h('p', {}, s.summary)))];
   },
@@ -546,6 +647,32 @@ const VIEWS = {
         ...field('Model', aiBox('model', { placeholder: state.settings.model })))];
   },
 
+  chat() {
+    const talk = state.stories.find((s) => s.id === ui.param && s.chat);
+    if (!talk) return VIEWS.characters();
+    const name = (id, fallback) => charName(id) || fallback;
+    const box = h('textarea', { id: 'box', rows: 2, placeholder: `Say something to ${name(talk.with, 'them')}…`, oninput: (e) => { ui.draft = e.target.value; } });
+    box.value = ui.draft;
+    const send = () => sendChat(talk, box.value.trim());
+    box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+    const as = h('select', { onchange: (e) => { talk.as = e.target.value; talk.characterIds = [talk.with, talk.as].filter(Boolean); save(); render(); } },
+      h('option', { value: '' }, 'Myself'), state.characters.filter((c) => c.id !== talk.with).map((c) => h('option', { value: c.id, selected: talk.as === c.id }, c.name)));
+    const last = talk.messages[talk.messages.length - 1];
+    return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('characters', talk.with) }, `← ${name(talk.with, 'Cast')}`),
+      talk.messages.length > 0 && listenBtn(talk)),
+      h('h2', {}, `💬 ${name(talk.with, 'Chat')}`),
+      ...field('You are talking as', as),
+      talk.messages.length ? talk.messages.map((m) => h('div', { class: 'bubble ' + m.role }, h('b', {}, (m.role === 'user' ? name(talk.as, 'You') : name(talk.with, 'Them')) + ': '),
+        h('span', { id: ui.busy && m === last ? 'reply' : null }, m.content)))
+        : h('div', { class: 'empty' }, `Say hi. ${name(talk.with, 'They')} knows your world and everything that happened in your stories.`),
+      box,
+      h('div', { class: 'row' }, h('button', { class: 'btn', disabled: ui.busy, onclick: send }, 'Send'),
+        ui.busy && h('button', { class: 'btn ghost', onclick: () => ui.abort && ui.abort.abort() }, 'Stop'),
+        !ui.busy && talk.messages.length > (talk.worldAt || 0) && h('button', { class: 'btn ghost', onclick: () => endChat(talk) }, '✓ Add this chat to my world')),
+      h('div', { class: 'status', id: 'status' }, ui.status),
+      h('p', { class: 'muted' }, 'Chats are saved with your stories. "Add this chat to my world" updates the world notes and the characters, like a story does.')];
+  },
+
   revise() {
     const plan = ui.revision;
     const nodes = [h('h2', {}, 'World revision'),
@@ -600,7 +727,7 @@ const VIEWS = {
       const data = A.normalizeState(raw);
       if (!confirm(`Replace your library with this backup (${data.otherWorlds.length + 1} worlds, ${data.stories.length + data.otherWorlds.reduce((n, x) => n + x.stories.length, 0)} stories)?`)) return;
       // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
-      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey']) data.settings[k] = s[k];
+      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel']) data.settings[k] = s[k];
       data.settings.ageOk = true;
       dropWorldKeys(data);
       state = data; ui.pendingImport = null; await save(); render();
@@ -615,11 +742,6 @@ const VIEWS = {
         await restore(plain);
       } catch (err) { alert('Could not read that file: ' + err.message); }
     } });
-    const exportLib = async () => {
-      const data = JSON.parse(JSON.stringify(state));
-      data.settings.apiKey = ''; data.settings.ttsKey = ''; dropWorldKeys(data);
-      download(JSON.stringify(await A.encryptBackup(data, await deviceKey())), `aetherstory-${new Date().toISOString().slice(0, 10)}.json`);
-    };
     // A backup from another device: ask for that device's key file (or the pasted key).
     const unlockBox = () => {
       const msg = h('div', { class: 'status' });
@@ -655,13 +777,25 @@ const VIEWS = {
       h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
       ...field('Instructions applied to every story', style),
       narrationSettings(),
+      h('h2', {}, 'Photo AI (optional, free)'),
+      h('p', { class: 'muted' }, s.photoKey ? '✓ On. "Describe from a photo" uses Google Gemini, which reads photos better than story models.'
+        : 'For the best results with "Describe from a photo" on the Cast tab, add a free Google Gemini key: open aistudio.google.com/apikey, sign in, tap Create API key, and paste it here. Without it, your main AI reads the photo.'),
+      h('p', { class: 'muted' }, 'Google\'s free tier may use what it is sent to improve its products, so with Private mode on, photos go to your main AI instead. Only the photo goes to Gemini, never your stories.'),
+      ...field('Gemini API key', bind('photoKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Gemini key' }))),
+      h('details', {}, h('summary', {}, 'Photo AI service and model'),
+        h('p', { class: 'muted' }, 'Any OpenAI-compatible service with a vision model works here.'),
+        ...field('Base URL', bind('photoBaseUrl', h('input', {}))), ...field('Model', bind('photoModel', h('input', {})))),
       h('h2', {}, 'App lock'),
       lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
         h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => location.reload() }, 'Lock now'),
           h('button', { class: 'btn ghost', onclick: async () => { if (!confirm('Turn off the lock? Your library will be stored unencrypted on this device.')) return; await setLock(null); render(); } }, 'Turn off'))]
         : lockSetup(),
       h('h2', {}, 'Library'),
-      h('p', { class: 'muted' }, `${state.otherWorlds.length + 1} worlds, ${state.stories.length + state.otherWorlds.reduce((n, x) => n + x.stories.length, 0)} stories, ${state.characters.length + state.library.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
+      h('p', { class: 'muted' }, `${state.otherWorlds.length + 1} worlds, ${totalStories()} stories, ${state.characters.length + state.library.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
+      h('p', {}, backupLine() + (ui.backupName ? ` Auto-backup is on: every story and chat is saved to ${ui.backupName}.` : '')),
+      canAutoBackup && h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: pickBackupFile }, ui.backupName ? 'Change auto-backup file' : 'Turn on auto-backup to a file'),
+        ui.backupName && h('button', { class: 'btn ghost', onclick: backupNow }, 'Back up now')),
+      canAutoBackup && h('p', { class: 'muted' }, 'Pick a file once (a synced folder like OneDrive or Google Drive keeps a copy off this PC too). If the browser asks again after a restart, tap Back up now.'),
       h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'),
         h('button', { class: 'btn ghost', onclick: async () => download(await deviceKey(), 'aetherstory-key.txt') }, 'Download key'), file,
         h('button', { class: 'btn danger', onclick: eraseAll }, 'Erase everything')),
@@ -710,6 +844,7 @@ function storyReader(story) {
     story.summary && h('p', { class: 'muted' }, story.summary),
     canSpeak && h('div', { class: 'row' }, listenBtn(story)),
     h('div', { class: 'prose' }, story.text),
+    choiceRow(story),
     h('div', { class: 'row' },
       h('button', { class: 'btn', disabled: ui.busy, onclick: () => { ui.premise = ''; generate(story.id); } }, 'Continue story'),
       h('button', { class: 'btn danger', onclick: async () => { if (!confirm('Delete this story? Its effects on the world stay.')) return; if (speaking && speaking.id === story.id) speak(story.id); state.stories = state.stories.filter((s) => s !== story); await save(); go('stories'); } }, 'Delete'))];
@@ -746,11 +881,24 @@ function characterEditor(c) {
     : canSpeak && h('select', {}, h('option', { value: '' }, 'Automatic, matched to the character'), voiceOptions(draft.voice));
   if (voice) inputs[state.settings.ttsKey ? 'ttsVoice' : 'voice'] = voice;
   const hear = () => speak('voice', [{ text: `Hi, I'm ${inputs.name.value.trim() || 'new here'}.`, who: { ...draft, ...Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value])) } }]);
+  const photo = h('input', { type: 'file', accept: 'image/*', style: 'display:none', onchange: async (e) => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    status.textContent = 'Looking at the photo…';
+    try {
+      const r = await chatJson(A.buildPhotoMessages(await shrinkImage(f)), { use: photoAi() });
+      if (!r.appearance) throw new Error('No description came back. Try another photo.');
+      inputs.appearance.value = r.appearance;
+      status.textContent = 'Appearance filled in. Review and Save. The photo itself is not kept.';
+    } catch (err) { status.textContent = err.message + (/image|vision|modalit/i.test(err.message) ? '\nThis model may not read photos. Add a free Gemini key under Settings → Photo AI.' : ''); }
+  } });
   const appearsIn = c ? state.stories.filter((s) => (s.characterIds || []).includes(c.id)) : [];
   return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('characters') }, '← Cast')),
     h('h2', {}, c ? c.name : 'New character'),
     !c && [idea, h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: aiFill }, '✨ Fill in with AI'))],
-    ...mk('name', 'Name'), ...mk('appearance', 'Appearance', true), ...mk('personality', 'Personality', true), ...mk('background', 'Background', true),
+    c && h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => startChat(c.id) }, `💬 Chat with ${c.name}`)),
+    ...mk('name', 'Name'), ...mk('appearance', 'Appearance', true),
+    h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => photo.click() }, '📷 Describe from a photo'), photo),
+    h('p', { class: 'muted' }, 'Fills in how they look (hair, build, style). Only physical traits are described, never who the person is. The photo is sent to your AI provider and not saved.'), ...mk('personality', 'Personality', true), ...mk('background', 'Background', true),
     ...field('Story developments (added automatically, one per line)', dev),
     voice && [...field('Voice when stories are read aloud', voice), h('div', { class: 'row' }, h('button', { class: 'btn ghost', id: 'listen', onclick: hear }, listenLabel('voice')))],
     status,
@@ -758,7 +906,7 @@ function characterEditor(c) {
       c && h('button', { class: 'btn ghost', onclick: () => download(JSON.stringify(A.exportCharacter(c), null, 2), `${c.name.replace(/[^\w-]+/g, '-')}.json`) }, 'Export'),
       c && A.worldNames(c, state).length > 1 && h('button', { class: 'btn ghost', onclick: async () => { A.removeFromWorld(state, c.id); ui.selected = ui.selected.filter((x) => x !== c.id); await save(); go('characters'); } }, 'Remove from this world'),
       c && h('button', { class: 'btn danger', onclick: async () => { if (!confirm(`Delete ${c.name}${A.worldNames(c, state).length > 1 ? ' from every world' : ''}?`)) return; state.characters = state.characters.filter((x) => x !== c); ui.selected = ui.selected.filter((x) => x !== c.id); await save(); go('characters'); } }, 'Delete')),
-    appearsIn.length > 0 && [h('h2', {}, 'Appears in'), appearsIn.map((s) => h('div', { class: 'card', onclick: () => go('stories', s.id) }, h('h3', {}, s.title), h('p', {}, s.summary || '')))]];
+    appearsIn.length > 0 && [h('h2', {}, 'Appears in'), appearsIn.map((s) => h('div', { class: 'card', onclick: () => openStory(s) }, h('h3', {}, (s.chat ? '💬 ' : '') + s.title), h('p', {}, s.summary || '')))]];
 }
 
 function lockSetup() {
@@ -800,6 +948,9 @@ async function eraseAll() {
   });
   // Anything that slips past a try/catch still shows up instead of failing silently.
   addEventListener('unhandledrejection', (e) => setStatus('Error: ' + ((e.reason && e.reason.message) || e.reason)));
+  // Ask the browser not to clear the library when space runs low or the app goes unused for a while.
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  if (canAutoBackup) ui.backupName = ((await backupFile()) || {}).name || '';
   render();
   if (canSpeak) speechSynthesis.addEventListener('voiceschanged', () => { if (ui.view === 'settings') render(); });
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});

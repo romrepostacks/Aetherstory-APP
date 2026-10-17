@@ -289,3 +289,39 @@ test('free OpenRouter models fall back to another free Nemotron, then the free r
   assert.equal(A.freeFallbacks(or, 'sao10k/l3.3-euryale-70b'), null);
   assert.equal(A.freeFallbacks('http://localhost:11434/v1', 'x:free'), null);
 });
+
+test('chat prompt plays the character, knows who is talking, and the transcript names both', () => {
+  const s = seeded();
+  const talk = { id: 'c1', chat: true, with: 'a', as: 'b', messages: [{ role: 'user', content: 'Hi.' }, { role: 'assistant', content: '*waves* Hey.' }] };
+  const [sys, ...rest] = A.buildChatMessages(s, talk);
+  assert.match(sys.content, /You are Mira/);
+  assert.match(sys.content, /Who you are talking to\n### Toren/);
+  assert.match(sys.content, /Magic is fading/);
+  assert.deepStrictEqual(rest.map((m) => m.role), ['user', 'assistant']);
+  assert.strictEqual(A.chatText(s, talk), 'Toren: Hi.\n\nMira: *waves* Hey.');
+  assert.strictEqual(A.chatText(s, { ...talk, as: '' }).split('\n')[0], 'You: Hi.');
+});
+
+test('world update keeps up to 3 next-step choices for stories, none for chats', () => {
+  const s = seeded();
+  const u = { choices: ['A storm hits', 'Toren returns', 'She sells the map', 'extra'] };
+  A.applyWorldUpdate(s, s.stories[0], u);
+  assert.deepStrictEqual(s.stories[0].choices, ['A storm hits', 'Toren returns', 'She sells the map']);
+  const talk = { id: 'c', chat: true, characterIds: ['a'], text: 'x' };
+  A.applyWorldUpdate(s, talk, u);
+  assert.strictEqual(talk.choices, undefined);
+  assert.match(A.buildWorldUpdateMessages(s, s.stories[0])[1].content, /"choices"/);
+});
+
+test('revisions skip chats', () => {
+  const s = seeded();
+  s.stories.push({ id: 'c', chat: true, characterIds: ['a'], text: 'Mira: hi', messages: [] });
+  assert.ok(!A.storiesForRevision(s, ['Mira']).some((x) => x.chat));
+  assert.ok(!A.storiesForRevision(s, []).some((x) => x.chat));
+});
+
+test('photo prompt sends the image and asks for physical traits only', () => {
+  const [m] = A.buildPhotoMessages('data:image/jpeg;base64,xx');
+  assert.strictEqual(m.content[1].image_url.url, 'data:image/jpeg;base64,xx');
+  assert.match(m.content[0].text, /Do not identify the person/);
+});

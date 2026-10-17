@@ -20,6 +20,10 @@
         ttsKey: '', // optional Venice key for paid, more natural voices
         ttsModel: 'tts-inworld-1-5-max',
         ttsNarrator: '',
+        // Optional second key just for reading photos: Google's free Gemini tier, through its OpenAI-compatible endpoint.
+        photoKey: '',
+        photoBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+        photoModel: 'gemini-flash-latest',
       },
       characters: [],
       stories: [],
@@ -228,7 +232,8 @@
       '{"title": "short evocative title", "summary": "2-3 sentence summary of what happened",\n' +
       ' "characterUpdates": [{"name": "known character", "development": "one sentence on what changed for them or what we learned"}],\n' +
       ' "newCharacters": [{"name": "", "appearance": "", "personality": "", "background": ""}],\n' +
-      ' "lore": ["new world facts"], "places": ["Name: description"], "relationships": ["A & B: state of their relationship"], "timeline": ["event in one line"]}\n' +
+      ' "lore": ["new world facts"], "places": ["Name: description"], "relationships": ["A & B: state of their relationship"], "timeline": ["event in one line"],\n' +
+      ' "choices": ["3 short, different options for what could happen next, each under 15 words"]}\n' +
       'relationships: for every pair whose relationship changed or was revealed in this story, give its CURRENT state (it replaces the old entry), e.g. "Mira & Kell: wary allies after the storm, unspoken attraction".\n' +
       'Otherwise only include NEW information not already in the bible. newCharacters only for named recurring-worthy characters not in the known list. Use empty arrays when nothing is new.';
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
@@ -266,6 +271,36 @@
     return added;
   }
 
+  // ---------- chat: talk with one character; saved with the stories so it feeds the world like one ----------
+  // ponytail: sends the last 40 messages; summarize older ones if long chats start losing the thread.
+  function buildChatMessages(state, chat) {
+    const c = state.characters.find((x) => x.id === chat.with) || { name: 'the character' };
+    const me = state.characters.find((x) => x.id === chat.as);
+    const system = [
+      `You are ${c.name}, a character in an ongoing fiction series, chatting with ${me ? me.name : 'the reader'}. Stay in character at all times and never mention being an AI.`,
+      'Reply as ' + c.name + ' only: speech, with actions in *asterisks*. Keep replies to a few short paragraphs and let the other person lead.',
+      state.settings.mature ? 'This is private adult fiction for a consenting adult. Sexual content is allowed when the conversation goes there; write it explicitly rather than deflecting.' : '',
+      state.settings.style ? `Guidelines from the reader: ${state.settings.style}` : '',
+      '\n## Series bible\n' + describeWorld(state.world),
+      '\n## You\n' + describeCharacter(c),
+      me ? '\n## Who you are talking to\n' + describeCharacter(me) : '',
+    ].filter(Boolean).join('\n');
+    return [{ role: 'system', content: system }, ...chat.messages.slice(-40).map((m) => ({ role: m.role, content: m.content }))];
+  }
+  // The chat as plain text, for the stories list, narration and the world update.
+  function chatText(state, chat) {
+    const name = (id, fallback) => (state.characters.find((x) => x.id === id) || {}).name || fallback;
+    return chat.messages.map((m) => `${m.role === 'user' ? name(chat.as, 'You') : name(chat.with, 'Them')}: ${m.content}`).join('\n\n');
+  }
+
+  // ---------- photo: physical description only, never who the person is ----------
+  function buildPhotoMessages(imageUrl) {
+    const text = 'Describe the physical appearance of the person in this photo for a fiction character sheet: apparent age range, build, skin tone, hair, eyes, face, and clothing style. ' +
+      'Do not identify the person, guess their name, or say anything about who they are, their background, health or private life; physical descriptors only. ' +
+      'Write 2-3 sentences in third person, using she/he/they as fits. Reply with JSON only: {"appearance": ""}';
+    return [{ role: 'user', content: [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageUrl } }] }];
+  }
+
   // Models sometimes wrap JSON in prose or ``` fences; grab the outermost object.
   function parseJsonLoose(text) {
     const start = text.indexOf('{');
@@ -298,6 +333,7 @@
     const changes = [];
     if (str(u.title)) story.title = str(u.title);
     if (str(u.summary)) story.summary = str(u.summary);
+    if (!story.chat) story.choices = strList(u.choices).slice(0, 3);
     const byName = (n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase());
 
     for (const cu of Array.isArray(u.characterUpdates) ? u.characterUpdates : []) {
@@ -394,9 +430,11 @@
   // Stories to check: those featuring or naming an affected character, or every story when the change isn't about anyone.
   function storiesForRevision(state, affected) {
     const people = state.characters.filter((c) => affected.some((n) => n.toLowerCase() === c.name.toLowerCase()));
-    if (!people.length) return state.stories.slice();
+    // Chats are kept as their messages, so a text edit wouldn't stick; they're left as they were.
+    const stories = state.stories.filter((s) => !s.chat);
+    if (!people.length) return stories;
     const named = (s, c) => charactersNamedIn({ characters: [c] }, s.text).length > 0;
-    return state.stories.filter((s) => people.some((c) => (s.characterIds || []).includes(c.id) || named(s, c)));
+    return stories.filter((s) => people.some((c) => (s.characterIds || []).includes(c.id) || named(s, c)));
   }
 
   // Mutates state with a reviewed plan and keeps what it replaced, so undoRevision can put it back.
@@ -596,7 +634,7 @@
   const unseal = decryptWith;
 
   const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
-    buildReviseSheetMessages, buildReviseStoryMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
+    buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
