@@ -424,7 +424,7 @@
   }
   // About one panel per 150 words, like a webtoon episode: a 3000-word story gets 20.
   const panelCount = (text) => Math.min(40, Math.max(8, Math.round(String(text || '').split(/\s+/).length / 150)));
-  const COMIC_STYLE = 'manhwa webtoon panel, full color digital art, clean line art, soft cel shading, cinematic lighting, detailed background';
+  const COMIC_STYLE = 'anime manhwa webtoon panel, 2d illustration, full color, clean line art, flat cel shading, anime eyes, detailed drawn background';
   // The image model knows nothing about the cast, so each visible character's name becomes their written appearance.
   function panelPrompt(state, panel) {
     const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
@@ -432,7 +432,7 @@
     return [COMIC_STYLE, str(panel && panel.scene), looks].filter(Boolean).join('. ').slice(0, 1500);
   }
   // A head-and-shoulders picture from the written appearance only; the name means nothing to the image model.
-  const PORTRAIT_STYLE = 'portrait, head and shoulders, looking at viewer, manhwa webtoon style, full color digital art, clean line art, soft cel shading, simple soft background';
+  const PORTRAIT_STYLE = 'anime portrait, head and shoulders, looking at viewer, manhwa webtoon style, 2d illustration, full color, clean line art, flat cel shading, anime eyes, simple soft background';
   function portraitPrompt(c) {
     const g = characterGender(c);
     return [PORTRAIT_STYLE, str(c && c.appearance) || `a ${g === 'f' ? 'woman' : g === 'm' ? 'man' : 'person'}`, 'fully clothed'].join('. ').slice(0, 1500);
