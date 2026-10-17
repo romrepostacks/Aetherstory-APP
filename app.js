@@ -474,7 +474,7 @@ async function drawComfy(prompt, onWait, { width, height, nsfw }) {
 }
 
 async function drawHorde(prompt, onWait, { width, height, nsfw }) {
-  const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-Tool' };
+  const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-APP' };
   const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt: `anime style, 2d illustration, ${prompt} ### ${NEGATIVE}`,
     params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw, censor_nsfw: false, r2: false, models: ANIME_MODELS }) });
   const job = await res.json().catch(() => ({}));
