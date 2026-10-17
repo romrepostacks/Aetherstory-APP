@@ -431,6 +431,12 @@
     const looks = who.map((c) => `${c.name}: ${c.appearance || 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person')}`).join('. ');
     return [COMIC_STYLE, str(panel && panel.scene), looks].filter(Boolean).join('. ').slice(0, 1500);
   }
+  // A head-and-shoulders picture from the written appearance only; the name means nothing to the image model.
+  const PORTRAIT_STYLE = 'portrait, head and shoulders, looking at viewer, manhwa webtoon style, full color digital art, clean line art, soft cel shading, simple soft background';
+  function portraitPrompt(c) {
+    const g = characterGender(c);
+    return [PORTRAIT_STYLE, str(c && c.appearance) || `a ${g === 'f' ? 'woman' : g === 'm' ? 'man' : 'person'}`, 'fully clothed'].join('. ').slice(0, 1500);
+  }
   function toPanels(state, r) {
     return (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 50).map((p) => ({
       prompt: panelPrompt(state, p), caption: str(p.caption),
@@ -710,7 +716,7 @@
   const unseal = decryptWith;
 
   const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
-    memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, toPanels,
+    memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, portraitPrompt, toPanels,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;

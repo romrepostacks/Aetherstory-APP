@@ -51,6 +51,10 @@
   .card.setup { cursor: default; }
   ol.steps { margin: 10px 0; padding-left: 22px; font: 0.95rem/1.5 system-ui, sans-serif; }
   ol.steps li { margin: 6px 0; }
+  .card .face { float: left; width: 48px; height: 48px; border-radius: 50%; object-fit: cover; margin: 0 12px 0 0; }
+  .card::after { content: ''; display: block; clear: both; }
+  img.portrait { display: block; width: 100%; max-width: 280px; border-radius: 12px; margin: 10px 0; }
+  img.portrait[hidden] { display: none; }
   .card p { margin: 0; color: var(--muted); font: 0.9rem/1.4 system-ui, sans-serif; }
   .prose { white-space: pre-wrap; line-height: 1.7; font-size: 1.08rem; }
   .comic figure { margin: 0 0 18px; }
