@@ -34,6 +34,8 @@ After each story the app asks the AI what changed and updates the world, the cha
 
 **Make it a comic** on any story turns it into manhwa-style panels: the AI splits the whole story into panels (about one per 150 words, so a long story gets around 20) with narration boxes and speech, and each panel is illustrated for free by [AI Horde](https://aihorde.net), a network of volunteer computers. Characters are drawn from their written appearance so they stay recognizable. A picture can take a minute or more; panels appear as they finish and are saved, so you can leave and come back. A free Horde key (*Settings → Pictures*) gets shorter waits. Pictures are off in Private mode.
 
+**Character portraits:** open a character and tap *Draw portrait* to get a free picture of them from their Appearance (also by AI Horde), or *Use my own picture* to pick one from your device. The portrait shows on the Cast list and is kept with your backups.
+
 **Long-term memory:** once a world outgrows what fits in a prompt (40 notes per list, 12 developments per character), the app quietly condenses the oldest entries into a few dense ones after a story, so early lore keeps shaping new stories. The originals are kept on the device.
 
 **Listen** reads any story aloud with the voices built into your phone or browser, free and with no setup. Each character speaks their dialogue in their own voice, matched to them automatically (change it on their Cast page). Pick the narrator voice and speed under *Settings → Narration*; downloading "Premium" voices on iPhone or using Edge on PC makes it sound far more natural. For the best voices, paste a Venice API key there (paid, about 3–11¢ a story; replays are free because the audio is saved on the device).

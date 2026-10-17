@@ -378,3 +378,10 @@ test('comic panel count follows story length', () => {
   assert.strictEqual(A.panelCount(words(20000)), 40);
   assert.match(A.buildPanelMessages(A.emptyState(), { title: 'T', text: words(3000) })[1].content, /about 20 panels/);
 });
+
+test('portraitPrompt draws from appearance, never the name', () => {
+  const p = A.portraitPrompt({ name: 'Ana', appearance: 'short silver hair, green eyes' });
+  assert.match(p, /silver hair/);
+  assert.doesNotMatch(p, /Ana/);
+  assert.match(A.portraitPrompt({ name: 'Ben', personality: 'he is calm' }), /portrait/);
+});

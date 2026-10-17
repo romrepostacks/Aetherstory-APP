@@ -411,10 +411,10 @@ async function condenseMemory() {
 // ---------- pictures: AI Horde, free volunteer-run image generation (anonymous works; a free key gets them sooner) ----------
 const HORDE = 'https://aihorde.net/api/v2';
 const NEGATIVE = 'text, speech bubble, watermark, signature, lowres, blurry, deformed, extra fingers, bad anatomy';
-async function drawImage(prompt, onWait) {
+async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature } = {}) {
   const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-Tool' };
   const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt: `${prompt} ### ${NEGATIVE}`,
-    params: { width: 512, height: 768, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw: !!state.settings.mature, censor_nsfw: false, r2: false, models: [] }) });
+    params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw, censor_nsfw: false, r2: false, models: [] }) });
   const job = await res.json().catch(() => ({}));
   if (!res.ok || !job.id) throw new Error(`The picture request failed (${res.status}). ${job.message || ''}`);
   const started = Date.now();
@@ -675,7 +675,7 @@ const VIEWS = {
         h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import character'), file),
       h('div', { class: 'status', id: 'status' }, ui.status),
       state.characters.length ? state.characters.map((c) => h('div', { class: 'card', onclick: () => go('characters', c.id) },
-        h('h3', {}, c.name), h('p', {}, c.personality || c.background || ''),
+        c.portrait && h('img', { class: 'face', src: c.portrait, alt: '' }), h('h3', {}, c.name), h('p', {}, c.personality || c.background || ''),
         (c.developments || []).length > 0 && h('p', {}, `${c.developments.length} story developments`)))
         : h('div', { class: 'empty' }, 'No characters yet. Create one, or use Quick start on the Write tab.'),
       lib.length > 0 && [h('h2', {}, `From your other worlds (${lib.length})`),
@@ -960,7 +960,7 @@ function characterEditor(c) {
     const vals = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value.trim()]));
     if (!vals.name) { status.textContent = 'A name is required.'; return; }
     const target = c || { id: A.uid(), createdAt: Date.now() };
-    Object.assign(target, vals, { developments: dev.value.split('\n').map((x) => x.trim()).filter(Boolean) });
+    Object.assign(target, vals, { portrait: draft.portrait || '', developments: dev.value.split('\n').map((x) => x.trim()).filter(Boolean) });
     if (!c) state.characters.push(target);
     await save(); go('characters');
   };
@@ -980,11 +980,35 @@ function characterEditor(c) {
       status.textContent = 'Appearance filled in. Review and Save. The photo itself is not kept.';
     } catch (err) { status.textContent = err.message + (/image|vision|modalit/i.test(err.message) ? '\nThis model may not read photos. Add a free Gemini key under Settings → Photo AI.' : ''); }
   } });
+  // Portrait: drawn free by AI Horde from the Appearance box, or the user's own picture. Stored on the character (on this device only).
+  const face = h('img', { class: 'portrait', alt: '', hidden: !draft.portrait, src: draft.portrait || null });
+  const setFace = async (img) => {
+    draft.portrait = face.src = img || ''; face.hidden = !img;
+    if (c) { c.portrait = draft.portrait; await save(); }
+  };
+  const drawFace = async (e) => {
+    if (state.settings.privateOnly) { status.textContent = 'Pictures are off in Private mode: they are drawn by volunteer computers that see the appearance description.'; return; }
+    e.target.disabled = true; status.textContent = 'Drawing the portrait. This is free and can take a minute or more…';
+    try {
+      await setFace(await drawImage(A.portraitPrompt({ ...draft, appearance: inputs.appearance.value.trim() }),
+        (q) => { if (q.queue_position) status.textContent = `Drawing the portrait, #${q.queue_position} in line…`; }, { width: 512, height: 512, nsfw: false }));
+      status.textContent = c ? 'Portrait saved.' : 'Portrait ready. Tap Save to keep it.';
+    } catch (err) { status.textContent = err.message; }
+    e.target.disabled = false;
+  };
+  const own = h('input', { type: 'file', accept: 'image/*', style: 'display:none', onchange: async (e) => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    try { await setFace(await shrinkImage(f, 512)); status.textContent = c ? 'Portrait saved.' : 'Tap Save to keep it.'; } catch (err) { status.textContent = 'Could not read that picture.'; }
+  } });
   const appearsIn = c ? state.stories.filter((s) => (s.characterIds || []).includes(c.id)) : [];
   return [h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('characters') }, '← Cast')),
     h('h2', {}, c ? c.name : 'New character'),
     !c && [idea, h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: aiFill }, '✨ Fill in with AI'))],
     c && h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => startChat(c.id) }, `💬 Chat with ${c.name}`)),
+    face,
+    h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: drawFace }, '🎨 Draw portrait'),
+      h('button', { class: 'btn ghost', onclick: () => own.click() }, '🖼️ Use my own picture'), own,
+      h('button', { class: 'btn ghost', onclick: () => { setFace(''); status.textContent = c ? 'Portrait removed.' : ''; } }, 'Remove picture')),
     ...mk('name', 'Name'), ...mk('appearance', 'Appearance', true),
     h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => photo.click() }, '📷 Describe from a photo'), photo),
     h('p', { class: 'muted' }, 'Fills in how they look (hair, build, style). Only physical traits are described, never who the person is. The photo is sent to your AI provider and not saved.'), ...mk('personality', 'Personality', true), ...mk('background', 'Background', true),
