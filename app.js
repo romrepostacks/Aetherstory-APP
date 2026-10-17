@@ -258,7 +258,7 @@ const dropWorldKeys = (data) => { for (const w of [data.world, ...data.otherWorl
 // ---------- backups: one tap, or written automatically to a file the user picked (PC browsers) ----------
 async function backupText() {
   const data = JSON.parse(JSON.stringify(state));
-  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; dropWorldKeys(data);
+  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; data.settings.hordeKey = ''; dropWorldKeys(data);
   return JSON.stringify(await A.encryptBackup(data, await deviceKey()));
 }
 const backedUp = () => { state.settings.lastBackup = Date.now(); return save(); };
@@ -299,8 +299,8 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { draft: '', backupName: '', locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null, reviseText: '', revision: null, reviseLog: [] };
-const openStory = (s) => go(s.chat ? 'chat' : 'stories', s.id);
+const ui = { draft: '', backupName: '', locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null, reviseText: '', revision: null, reviseLog: [], drawing: null, comic: false };
+const openStory = (s) => { ui.comic = false; go(s.chat ? 'chat' : 'stories', s.id); };
 const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['revise', '🪄', 'Revise'], ['settings', '⚙️', 'Settings']];
 
 function go(view, param = null) {
@@ -350,6 +350,7 @@ async function generate(continueId) {
   } catch (e) {
     setStatus('Story saved, but the world update failed: ' + e.message);
   }
+  await condenseMemory();
   await autoBackup().catch(() => {});
   finish();
 }
@@ -390,11 +391,82 @@ async function endChat(talk) {
     await save();
     setStatus(changes.length ? 'World updated: ' + changes.join(', ') : 'Saved. Nothing new for the world this time.');
   } catch (e) { setStatus('The world update failed: ' + e.message); }
+  await condenseMemory();
   await autoBackup().catch(() => {});
   finish();
 }
 const choiceRow = (story) => (story.choices || []).length > 0 && [h('h3', {}, 'What happens next?'),
   h('div', { class: 'chips' }, story.choices.map((c) => h('button', { class: 'chip', disabled: ui.busy, onclick: () => { ui.premise = c; generate(story.id); ui.premise = ''; } }, c)))];
+
+// Long-term memory: condense the oldest world notes and developments once they outgrow what the prompts show. Best effort.
+async function condenseMemory() {
+  const plan = A.memoryPlan(state);
+  if (!plan) return;
+  const s = ui.status;
+  setStatus(s + ' Tidying long-term memory…');
+  try { if (A.applyMemory(state, plan, await chatJson(A.buildMemoryMessages(state, plan))).length) await save(); } catch (e) { /* tries again after the next story */ }
+  setStatus(s);
+}
+
+// ---------- pictures: AI Horde, free volunteer-run image generation (anonymous works; a free key gets them sooner) ----------
+const HORDE = 'https://aihorde.net/api/v2';
+const NEGATIVE = 'text, speech bubble, watermark, signature, lowres, blurry, deformed, extra fingers, bad anatomy';
+async function drawImage(prompt, onWait) {
+  const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-Tool' };
+  const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt: `${prompt} ### ${NEGATIVE}`,
+    params: { width: 512, height: 768, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7 }, nsfw: !!state.settings.mature, censor_nsfw: false, r2: false, models: [] }) });
+  const job = await res.json().catch(() => ({}));
+  if (!res.ok || !job.id) throw new Error(`The picture request failed (${res.status}). ${job.message || ''}`);
+  const started = Date.now();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 6000));
+    const c = await (await fetch(`${HORDE}/generate/check/${job.id}`, { headers })).json().catch(() => ({}));
+    if (c.done) break;
+    if (c.faulted || c.is_possible === false || Date.now() - started > 15 * 60e3) {
+      fetch(`${HORDE}/generate/status/${job.id}`, { method: 'DELETE', headers }).catch(() => {});
+      throw new Error('No artist was free for this picture right now.');
+    }
+    if (onWait) onWait(c);
+  }
+  const g = ((await (await fetch(`${HORDE}/generate/status/${job.id}`, { headers })).json()).generations || [])[0];
+  if (!g || !g.img || g.censored) throw new Error(g && g.censored ? 'The artist\'s filter blocked this picture.' : 'No picture came back.');
+  const blob = g.img.startsWith('http') ? await (await fetch(g.img)).blob() : new Blob([Uint8Array.from(atob(g.img), (ch) => ch.charCodeAt(0))], { type: 'image/webp' });
+  return shrinkImage(blob);
+}
+
+// Turns a story into manhwa panels: the story AI plans them, then each is drawn in turn and saved as it lands, so leaving midway loses nothing.
+// ponytail: images live in the library as JPEG data URLs (~60 KB each); move them to their own store if saves or backups get slow.
+async function makeComic(story, replan) {
+  if (ui.drawing) return;
+  if (state.settings.privateOnly) return setStatus('Pictures are off in Private mode: they are drawn by volunteer computers that see the scene descriptions.');
+  const here = () => ui.view === 'stories' && ui.param === story.id;
+  ui.drawing = story.id; ui.comic = true; render();
+  try {
+    if (replan || !(story.panels || []).length) {
+      setStatus('Planning the panels…');
+      const panels = A.toPanels(state, await chatJson(A.buildPanelMessages(state, story)));
+      if (!panels.length) throw new Error('No panels came back.');
+      story.panels = panels;
+      await save(); if (here()) render();
+    }
+    const n = story.panels.length;
+    for (const [i, p] of story.panels.entries()) {
+      if (p.img) continue;
+      setStatus(`Drawing panel ${i + 1} of ${n}…`);
+      p.img = await drawImage(p.prompt, (c) => setStatus(`Drawing panel ${i + 1} of ${n}… ${c.queue_position ? `#${c.queue_position} in line, ` : ''}about ${c.wait_time || 0}s left`));
+      await save(); if (here()) render();
+    }
+    ui.status = 'Comic ready.';
+  } catch (e) { ui.status = e.message + ' Tap "Draw missing panels" to try again.'; }
+  ui.drawing = null;
+  if (here()) render();
+  setStatus(ui.status);
+}
+const comicView = (story) => h('div', { class: 'comic' }, story.panels.map((p, i) => h('figure', {},
+  p.img ? h('img', { src: p.img, alt: p.caption || `Panel ${i + 1}` }) : h('div', { class: 'ph' }, ui.drawing === story.id ? 'Drawing…' : 'Not drawn yet'),
+  p.caption && h('figcaption', { class: 'cap' }, p.caption),
+  p.dialogue.map((d) => h('p', { class: 'bubble' }, d.name && h('b', {}, d.name + ' '), d.line)),
+  p.img && ui.drawing !== story.id && h('button', { class: 'chip', onclick: () => { p.img = ''; makeComic(story); } }, '↻ Redraw'))));
 
 // Photos go to the AI as a small JPEG: quicker, and redrawing drops the location and camera data photos carry.
 async function shrinkImage(file, max = 768) {
@@ -727,7 +799,7 @@ const VIEWS = {
       const data = A.normalizeState(raw);
       if (!confirm(`Replace your library with this backup (${data.otherWorlds.length + 1} worlds, ${data.stories.length + data.otherWorlds.reduce((n, x) => n + x.stories.length, 0)} stories)?`)) return;
       // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
-      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel']) data.settings[k] = s[k];
+      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel', 'hordeKey']) data.settings[k] = s[k];
       data.settings.ageOk = true;
       dropWorldKeys(data);
       state = data; ui.pendingImport = null; await save(); render();
@@ -785,6 +857,11 @@ const VIEWS = {
       h('details', {}, h('summary', {}, 'Photo AI service and model'),
         h('p', { class: 'muted' }, 'Any OpenAI-compatible service with a vision model works here.'),
         ...field('Base URL', bind('photoBaseUrl', h('input', {}))), ...field('Model', bind('photoModel', h('input', {})))),
+      h('h2', {}, 'Pictures (free)'),
+      h('p', { class: 'muted' }, '"Make it a comic" on a story turns it into illustrated manhwa panels. They are drawn for free by AI Horde, a network of volunteer computers, so a picture can take a minute or more. ' +
+        (s.hordeKey ? '✓ Your Horde key is on, so your pictures skip ahead of anonymous ones.' : 'For shorter waits, register for free at aihorde.net/register and paste the API key it gives you here.')),
+      h('p', { class: 'muted' }, 'Only each panel\'s scene description and the characters\' looks are sent, never the story itself. Volunteers\' computers see those descriptions, so pictures are off in Private mode.'),
+      ...field('AI Horde API key (optional)', bind('hordeKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Horde key' }))),
       h('h2', {}, 'App lock'),
       lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
         h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => location.reload() }, 'Lock now'),
@@ -842,8 +919,15 @@ function storyReader(story) {
     h('h2', {}, story.title),
     h('p', { class: 'muted' }, [fmtDate(story.createdAt), (story.characterIds || []).map(charName).filter(Boolean).join(', ')].filter(Boolean).join(' · ')),
     story.summary && h('p', { class: 'muted' }, story.summary),
-    canSpeak && h('div', { class: 'row' }, listenBtn(story)),
-    h('div', { class: 'prose' }, story.text),
+    h('div', { class: 'row' }, listenBtn(story),
+      (story.panels || []).length ? h('button', { class: 'btn ghost', onclick: () => { ui.comic = !ui.comic; render(); } }, ui.comic ? '📖 Read as text' : '🖼️ View comic')
+        : h('button', { class: 'btn ghost', disabled: !!ui.drawing, onclick: () => makeComic(story) }, '🖼️ Make it a comic')),
+    ui.comic && (story.panels || []).length ? [comicView(story),
+      h('div', { class: 'row' },
+        story.panels.some((p) => !p.img) && h('button', { class: 'btn', disabled: !!ui.drawing, onclick: () => makeComic(story) }, 'Draw missing panels'),
+        h('button', { class: 'btn ghost', disabled: !!ui.drawing, onclick: () => { if (confirm('Plan and draw the whole comic again?')) makeComic(story, true); } }, 'Redo comic'))]
+      : h('div', { class: 'prose' }, story.text),
+    h('div', { class: 'status', id: 'status' }, ui.status),
     choiceRow(story),
     h('div', { class: 'row' },
       h('button', { class: 'btn', disabled: ui.busy, onclick: () => { ui.premise = ''; generate(story.id); } }, 'Continue story'),
