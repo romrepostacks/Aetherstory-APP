@@ -20,10 +20,11 @@
         ttsKey: '', // optional Venice key for paid, more natural voices
         ttsModel: 'tts-inworld-1-5-max',
         ttsNarrator: '',
-        // Optional second key just for reading photos: Google's free Gemini tier, through its OpenAI-compatible endpoint.
+        // Optional second key just for reading photos: OpenAI, whose vision is strong and costs a fraction of a cent a photo.
+        // ponytail: gpt-4.1-mini because it accepts the temperature chatOnce sends; GPT-5 models reject it.
         photoKey: '',
-        photoBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-        photoModel: 'gemini-flash-latest',
+        photoBaseUrl: 'https://api.openai.com/v1',
+        photoModel: 'gpt-4.1-mini',
       },
       characters: [],
       stories: [],
