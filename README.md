@@ -24,6 +24,14 @@ After each story the app asks the AI what changed and updates the world, the cha
 
 **Revise** fixes a detail everywhere at once. Type the change in plain words ("Ana has red hair, not black"); the AI updates the character sheets, the world notes and every saved story that contradicts it, shows each change for review, and applies them on one tap. The last five revisions can be undone. Future stories follow the change because they read the updated sheets.
 
+**What happens next?** After each story, tap one of three suggested directions to continue it, or ignore them.
+
+**Chat** with any character from their Cast page. They know the world and everything that happened in your stories. Pick who you're talking as (yourself or another character). Chats are saved with your stories; tap *Add this chat to my world* and it updates the world notes and characters like a story does.
+
+**Describe from a photo** on a character's page fills in their appearance (hair, build, style) from a picture. Only physical traits are described, never who the person is, and the photo isn't kept. For the best results, paste a free Google Gemini key under *Settings → Photo AI* (from aistudio.google.com/apikey); otherwise the default free model reads it.
+
+**Backups:** the app asks the browser to keep its data permanently, and reminds you on the Write tab when your last backup is a week old. On a PC, *Settings → Turn on auto-backup to a file* writes a fresh backup after every story and chat; pick a file in a synced folder (OneDrive, Google Drive) to keep a copy off the device.
+
 **Listen** reads any story aloud with the voices built into your phone or browser, free and with no setup. Each character speaks their dialogue in their own voice, matched to them automatically (change it on their Cast page). Pick the narrator voice and speed under *Settings → Narration*; downloading "Premium" voices on iPhone or using Edge on PC makes it sound far more natural. For the best voices, paste a Venice API key there (paid, about 3–11¢ a story; replays are free because the audio is saved on the device).
 
 ## AI providers
