@@ -85,6 +85,8 @@
     { q: '"ComfyUI has no model yet"', a: ['Put an anime model file in ComfyUI\\models\\checkpoints (step 3 of the ComfyUI guide), restart ComfyUI, and tap Test.'] },
     { q: 'ComfyUI says "out of memory"', a: ['Close games and any other ComfyUI window, then try again. If it keeps happening, add ` --lowvram` to the end of the line in start-aetherstory.bat.'] },
     { q: '"This model may not read photos"', a: ['"Describe from a photo" needs a model that can see pictures. Add a free Gemini key under Settings → Photo AI.'] },
+    { q: 'Face ID doesn\'t show up for App lock, or says this device can\'t use it', a: ['Face ID unlock needs iOS 18 or newer (or a recent Chrome or Edge with Windows Hello on a PC) and a lock that uses a PIN. If Settings → App lock shows "Change to a PIN", tap it first. If it still says this device can\'t use it, update your phone, or keep using the PIN: it works the same.'] },
+    { q: 'I changed my PIN and Face ID stopped working', a: ['Changing the PIN asks for Face ID once to re-save it. If that was cancelled, Face ID is turned off: open Settings → App lock and tap Unlock with Face ID again.'] },
   ];
 
   root.HELP = { guides, problems };
