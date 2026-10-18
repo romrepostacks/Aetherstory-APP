@@ -451,9 +451,10 @@
   const COMIC_STYLE = 'anime manhwa webtoon panel, 2d illustration, full color, clean line art, flat cel shading, anime eyes, detailed drawn background';
   // The image model knows nothing about the cast, so each visible character's name becomes their written appearance.
   // Image models weigh the start of a prompt most, so the head count and action tags come first, then the scene, short looks and the art style.
+  const panelCast = (state, panel) => strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
   // `tags` holds each character's fixed look tags for the whole comic, so hair and faces don't drift from panel to panel.
   function panelPrompt(state, panel, tags = {}) {
-    const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
+    const who = panelCast(state, panel);
     const lookOf = (c) => str(tags[Object.keys(tags).find((k) => k.toLowerCase() === c.name.toLowerCase())]);
     const looks = who.map((c) => `${c.name}: ` + (lookOf(c) || (c.appearance ? c.appearance.slice(0, 100) : 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person')))).join('. ');
     // Anime models are trained on head-count tags (1girl, 2boys), so without them a two-person act often comes out as one person.
@@ -469,7 +470,7 @@
   }
   function toPanels(state, r) {
     return (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 50).map((p) => ({
-      prompt: panelPrompt(state, p, r.looks && typeof r.looks === 'object' ? r.looks : {}), caption: str(p.caption),
+      prompt: panelPrompt(state, p, r.looks && typeof r.looks === 'object' ? r.looks : {}), who: panelCast(state, p).map((c) => c.id), caption: str(p.caption),
       dialogue: (Array.isArray(p.dialogue) ? p.dialogue : []).filter((d) => d && str(d.line)).map((d) => ({ name: str(d.name), line: str(d.line) })),
     }));
   }

@@ -531,11 +531,11 @@ const NEGATIVE = 'photorealistic, realistic, photo, photography, 3d, 3d render, 
 const PRIVATE_PICTURES = 'Pictures are off in Private mode: AI Horde\'s volunteer computers would see the descriptions. Draw them on your own PC with ComfyUI instead (Settings → Help & guides).';
 const canDraw = () => !state.settings.privateOnly || !!state.settings.comfyUrl;
 let comfyNote = ''; // why the last picture went to Horde instead of the PC, shown with the progress
-async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature, signal } = {}) {
+async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature, signal, face } = {}) {
   const s = state.settings;
   prompt = [nsfw && A.spiceText(s, 'image'), prompt].filter(Boolean).join(', '); // Spice tags first: image models weigh the start most
   if (s.comfyUrl) {
-    try { const img = await drawComfy(prompt, onWait, { width, height, nsfw, signal }); comfyNote = ''; return img; } catch (e) {
+    try { const img = await drawComfy(prompt, onWait, { width, height, nsfw, signal, face }); comfyNote = ''; return img; } catch (e) {
       if (signal && signal.aborted) throw e; // cancelled, not broken: don't hand it to Horde
       const why = comfyError(e);
       if (s.privateOnly) throw new Error(why + ' Private mode is on, so AI Horde isn\'t used instead. See Settings → Help & guides.');
@@ -555,7 +555,18 @@ async function comfyModels() {
   const opt = (await res.json()).CheckpointLoaderSimple.input.required.ckpt_name;
   return Array.isArray(opt[0]) ? opt[0] : (opt[1] && opt[1].options) || []; // older and newer ComfyUI list choices differently
 }
-async function drawComfy(prompt, onWait, { width, height, nsfw, signal }) {
+// A drawn portrait (data URL) goes to ComfyUI's input folder, one file per character, so IP-Adapter can copy its face and hair.
+async function comfyUpload(dataUrl, name) {
+  const [head, b64] = dataUrl.split(','), bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0)); // the page's CSP blocks fetch() on data: URLs
+  const form = new FormData();
+  form.append('image', new Blob([bytes], { type: head.slice(5).split(';')[0] }), name);
+  form.append('overwrite', 'true');
+  const res = await fetch(comfyBase() + '/upload/image', { method: 'POST', body: form });
+  if (!res.ok) throw new Error(`ComfyUI refused the face reference (${res.status}).`);
+  const r = await res.json();
+  return r.subfolder ? `${r.subfolder}/${r.name}` : r.name;
+}
+async function drawComfy(prompt, onWait, { width, height, nsfw, signal, face }) {
   const model = state.settings.comfyModel || (await comfyModels())[0];
   if (!model) throw new Error('ComfyUI has no model yet. Put an anime model in ComfyUI\'s models\\checkpoints folder and restart it.');
   const k = Math.sqrt(1024 * 1024 / (width * height)), px = (x) => Math.round((x * k) / 64) * 64; // SDXL models draw best near one megapixel
@@ -569,8 +580,18 @@ async function drawComfy(prompt, onWait, { width, height, nsfw, signal }) {
     6: { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
     7: { class_type: 'PreviewImage', inputs: { images: ['6', 0] } }, // ComfyUI's temp folder: nothing piles up in its output folder
   };
+  if (face) { // needs the ComfyUI_IPAdapter_plus nodes and their SDXL models (Help → Same faces in every picture)
+    Object.assign(workflow, {
+      8: { class_type: 'LoadImage', inputs: { image: await comfyUpload(face.img, `aetherstory-face-${face.id}.jpg`) } },
+      9: { class_type: 'IPAdapterUnifiedLoader', inputs: { model: ['1', 0], preset: 'PLUS (high strength)' } },
+      10: { class_type: 'IPAdapter', inputs: { model: ['9', 0], ipadapter: ['9', 1], image: ['8', 0], weight: 0.7, start_at: 0, end_at: 1, weight_type: 'standard' } },
+    });
+    workflow[5].inputs.model = ['10', 0];
+  }
   const res = await fetch(comfyBase() + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }), signal });
   const job = await res.json().catch(() => ({}));
+  // Without IP-Adapter installed ComfyUI rejects the face nodes, so draw from the words alone.
+  if (face && !job.prompt_id && !(signal && signal.aborted)) { comfyNote = ' Face references need IP-Adapter in ComfyUI (Help → Same faces in every picture).'; return drawComfy(prompt, onWait, { width, height, nsfw, signal }); }
   if (!res.ok || !job.prompt_id) throw new Error(`ComfyUI refused the picture (${(job.error && job.error.message) || res.status}).`);
   const started = Date.now();
   // ponytail: Cancel stops waiting but lets ComfyUI finish the one picture it's on (seconds); POST /interrupt if that ever matters.
@@ -634,7 +655,7 @@ async function makeComic(story, replan) {
     progress();
     await Promise.all([0, 1].map(async () => {
       for (let p; (p = todo.shift());) {
-        try { p.img = await drawImage(p.prompt, progress, { signal: j.signal }); } catch (e) { todo.length = 0; throw e; } // the other one stops after its current panel
+        try { p.img = await drawImage(p.prompt, progress, { signal: j.signal, face: panelFace(p) }); } catch (e) { todo.length = 0; throw e; } // the other one stops after its current panel
         done++; progress();
         await save(); if (here()) render();
       }
@@ -648,6 +669,11 @@ async function makeComic(story, replan) {
   ui.drawing = null;
   if (here()) render();
   setStatus(ui.status);
+}
+// ponytail: a face reference only for panels with one portrayed character; two references would blend both faces. Regional masks if that matters.
+function panelFace(p) {
+  const drawn = (p.who || []).map((id) => state.characters.find((c) => c.id === id)).filter((c) => c && c.portrait && c.portraitDrawn);
+  return drawn.length === 1 ? { id: drawn[0].id, img: drawn[0].portrait } : null;
 }
 const comicView = (story) => h('div', { class: 'comic' }, story.panels.map((p, i) => h('figure', {},
   p.img ? h('img', { src: p.img, alt: p.caption || `Panel ${i + 1}` }) : h('div', { class: 'ph' }, ui.drawing === story.id ? 'Drawing…' : 'Not drawn yet'),
@@ -1293,7 +1319,7 @@ function characterEditor(c) {
     const vals = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value.trim()]));
     if (!vals.name) { status.textContent = 'A name is required.'; return; }
     const target = c || { id: A.uid(), createdAt: Date.now() };
-    Object.assign(target, vals, { portrait: draft.portrait || '', developments: dev.value.split('\n').map((x) => x.trim()).filter(Boolean) });
+    Object.assign(target, vals, { portrait: draft.portrait || '', portraitDrawn: !!(draft.portrait && draft.portraitDrawn), developments: dev.value.split('\n').map((x) => x.trim()).filter(Boolean) });
     if (!c) state.characters.push(target);
     await save(); go('characters');
   };
@@ -1322,9 +1348,10 @@ function characterEditor(c) {
   } });
   // Portrait: drawn free by AI Horde from the Appearance box, or the user's own picture. Stored on the character (on this device only).
   const face = h('img', { class: 'portrait', alt: '', hidden: !draft.portrait, src: draft.portrait || null });
-  const setFace = async (img) => {
-    draft.portrait = face.src = img || ''; face.hidden = !img;
-    if (c) { c.portrait = draft.portrait; await save(); }
+  // Only drawn portraits become ComfyUI face references for comics, never the user's own picture (it may be a photo of a real person).
+  const setFace = async (img, drawn = false) => {
+    draft.portrait = face.src = img || ''; face.hidden = !img; draft.portraitDrawn = drawn;
+    if (c) { c.portrait = draft.portrait; c.portraitDrawn = drawn; await save(); }
   };
   const drawFace = async () => {
     if (!canDraw()) { status.textContent = PRIVATE_PICTURES; return; }
@@ -1334,7 +1361,7 @@ function characterEditor(c) {
     j.step(0, state.settings.comfyUrl ? 'Your PC usually takes a few seconds.' : 'AI Horde is free and run by volunteers, so this can take a minute or more. Only the Appearance box is sent, never their name or your stories.');
     try {
       await setFace(await drawImage(A.portraitPrompt({ ...draft, appearance: inputs.appearance.value.trim() }),
-        (q) => j.step(1, [`Drawing on ${artist()}.`, waitText(q), comfyNote.trim()].filter(Boolean).join('\n')), { width: 512, height: 512, nsfw: false, signal: j.signal }));
+        (q) => j.step(1, [`Drawing on ${artist()}.`, waitText(q), comfyNote.trim()].filter(Boolean).join('\n')), { width: 512, height: 512, nsfw: false, signal: j.signal }), true);
       status.textContent = c ? 'Portrait saved.' : 'Portrait ready. Tap Save to keep it.';
       j.end();
     } catch (err) { j.end(err); }

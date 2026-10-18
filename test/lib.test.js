@@ -369,6 +369,7 @@ test('comic panels swap names for written appearance in the image prompt', () =>
   assert.match(panels[0].prompt, /anime manhwa/);
   assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side\. Ana on a rainy pier/);
   assert.match(panels[0].prompt, /Ana: tall, red braid, green coat/);
+  assert.deepStrictEqual(panels[0].who, ['a', 'b']);
   assert.deepStrictEqual(panels[0].dialogue, [{ name: 'Ana', line: 'Wait.' }]);
   assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /- Ana: tall, red braid/);
 });

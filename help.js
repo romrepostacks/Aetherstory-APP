@@ -50,6 +50,13 @@
         'One at a time: both share the same graphics card, and a laptop card can\'t hold two models at once. Close the other ComfyUI window before drawing in Aetherstory, and the other way round.',
         'No clutter: Aetherstory\'s pictures go to ComfyUI\'s temp folder, which empties itself, and are saved inside the app. Your other project\'s output folder stays untouched.'],
       'Short on disk space? The model files are the big part. You can delete the one you don\'t need in either copy\'s models\\checkpoints folder.'] },
+    { id: 'faces', title: 'Same faces in every picture', body: [
+      'With ComfyUI, a character\'s drawn portrait can guide every comic panel they appear in alone, so their face and hair stay the same. It uses the free IP-Adapter add-on.',
+      ['In ComfyUI open Manager → Custom Nodes Manager, search `ComfyUI_IPAdapter_plus`, and install it.',
+        'Download `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` into ComfyUI\'s models\\clip_vision folder and `ip-adapter-plus_sdxl_vit-h.safetensors` into models\\ipadapter (both free on huggingface.co/h94/IP-Adapter).',
+        'Restart ComfyUI.',
+        'In Aetherstory open each character and tap Draw portrait. Then tap Redo comic on a story.'],
+      'Only portraits drawn by the app are used, never a picture you added yourself. Panels with two or more people use the look words only, because two references blend the faces together.'] },
     { id: 'phone', title: 'Use your PC\'s ComfyUI from your phone', body: [
       'Your phone can use the PC\'s ComfyUI from anywhere through Tailscale, a free private network between your own devices. Nothing is opened to the internet.',
       ['Install Tailscale (tailscale.com/download) on the PC and on the phone, and sign in to the same account on both. Both should show Connected.',
