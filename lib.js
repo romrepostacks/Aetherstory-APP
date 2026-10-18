@@ -189,17 +189,18 @@
   // Spice: how explicit things get while Mature content is on. Adult is how stories were written before the levels existed.
   const ADULT_STORY = 'This is private adult fiction for a consenting adult reader. Sexual content is wanted: when the story calls for it, write it explicitly and in vivid detail instead of fading to black or softening it into a sweet romance.';
   const ADULT_CHAT = 'This is private adult fiction for a consenting adult. Sexual content is allowed when the conversation goes there; write it explicitly rather than deflecting.';
-  const ADULT_PANELS = ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully.';
+  // The image model sees only the scene text, so intimate panels must say plainly what is on show, in the tag words anime models know.
+  const ADULT_PANELS = ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully. The scene text is all the illustrator sees: in intimate panels, state plainly who is nude or partly undressed and what sexual act is shown, with short tag words (nsfw, nude, topless, sex, oral, cum, etc.) instead of euphemisms.';
   const SPICE = {
     adult: { label: 'Adult', hint: 'Explicit when the story calls for it.', story: ADULT_STORY, chat: ADULT_CHAT, panels: ADULT_PANELS, image: '' },
     kinky: { label: 'Kinky', hint: 'More heat, more often, with kinks and dirty talk.',
       story: ADULT_STORY + ' Turn the heat up: build sexual tension from the first scene, include at least one explicit sex scene, and lean into kinks and dirty talk that fit the characters (dominance and submission, teasing, toys, roleplay, risky places). All characters are consenting adults.',
       chat: ADULT_CHAT + ' Be flirtatious and forward, and steer toward sex and kinks that fit you.',
-      panels: ADULT_PANELS + ' Show the sexual tension and intimate scenes on the page instead of cutting away.', image: 'sensual, erotic, suggestive' },
+      panels: ADULT_PANELS + ' Show the sexual tension and intimate scenes on the page instead of cutting away.', image: 'nsfw, sensual, erotic, lewd' },
     nympho: { label: 'Nympho', hint: 'Sex is the heart of every story.',
       story: ADULT_STORY + ' Make sex the heart of the story: the characters are insatiable and can barely keep their hands off each other, scenes turn sexual quickly and often, with several long, graphic encounters and filthy dialogue throughout. All characters are consenting adults.',
       chat: ADULT_CHAT + ' You are insatiable: be openly sexual, start things yourself and escalate eagerly.',
-      panels: ADULT_PANELS + ' Draw the intimate scenes explicitly and give them several panels.', image: 'explicit, nsfw, erotic' },
+      panels: ADULT_PANELS + ' Draw the intimate scenes explicitly and give them several panels.', image: 'nsfw, explicit, erotic, nude, sex' },
   };
   const spiceText = (settings, kind) => (settings.mature ? (SPICE[settings.spice] || SPICE.adult)[kind] : '');
 
@@ -447,10 +448,11 @@
   const panelCount = (text) => Math.min(40, Math.max(8, Math.round(String(text || '').split(/\s+/).length / 150)));
   const COMIC_STYLE = 'anime manhwa webtoon panel, 2d illustration, full color, clean line art, flat cel shading, anime eyes, detailed drawn background';
   // The image model knows nothing about the cast, so each visible character's name becomes their written appearance.
+  // Image models weigh the start of a prompt most, so the action comes first, then short looks, then the art style.
   function panelPrompt(state, panel) {
     const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
-    const looks = who.map((c) => `${c.name}: ${c.appearance || 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person')}`).join('. ');
-    return [COMIC_STYLE, str(panel && panel.scene), looks].filter(Boolean).join('. ').slice(0, 1500);
+    const looks = who.map((c) => `${c.name}: ` + (c.appearance ? c.appearance.slice(0, 160) : 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person'))).join('. ');
+    return [str(panel && panel.scene), looks, COMIC_STYLE].filter(Boolean).join('. ').slice(0, 1500);
   }
   // A head-and-shoulders picture from the written appearance only; the name means nothing to the image model.
   const PORTRAIT_STYLE = 'anime portrait, head and shoulders, looking at viewer, manhwa webtoon style, 2d illustration, full color, clean line art, flat cel shading, anime eyes, simple soft background';
