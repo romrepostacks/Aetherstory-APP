@@ -533,7 +533,7 @@ const canDraw = () => !state.settings.privateOnly || !!state.settings.comfyUrl;
 let comfyNote = ''; // why the last picture went to Horde instead of the PC, shown with the progress
 async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature, signal } = {}) {
   const s = state.settings;
-  prompt = [prompt, nsfw && A.spiceText(s, 'image')].filter(Boolean).join(', ');
+  prompt = [nsfw && A.spiceText(s, 'image'), prompt].filter(Boolean).join(', '); // Spice tags first: image models weigh the start most
   if (s.comfyUrl) {
     try { const img = await drawComfy(prompt, onWait, { width, height, nsfw, signal }); comfyNote = ''; return img; } catch (e) {
       if (signal && signal.aborted) throw e; // cancelled, not broken: don't hand it to Horde
@@ -561,7 +561,7 @@ async function drawComfy(prompt, onWait, { width, height, nsfw, signal }) {
   const k = Math.sqrt(1024 * 1024 / (width * height)), px = (x) => Math.round((x * k) / 64) * 64; // SDXL models draw best near one megapixel
   const workflow = {
     1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
-    2: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: `masterpiece, best quality, anime style, 2d illustration, ${prompt}` } },
+    2: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: `${prompt}, anime style, 2d illustration, masterpiece, best quality` } },
     3: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: NEGATIVE + (nsfw ? '' : ', nsfw, nude') } },
     4: { class_type: 'EmptyLatentImage', inputs: { width: px(width), height: px(height), batch_size: 1 } },
     5: { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0],
