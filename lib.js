@@ -190,7 +190,7 @@
   const ADULT_STORY = 'This is private adult fiction for a consenting adult reader. Sexual content is wanted: when the story calls for it, write it explicitly and in vivid detail instead of fading to black or softening it into a sweet romance.';
   const ADULT_CHAT = 'This is private adult fiction for a consenting adult. Sexual content is allowed when the conversation goes there; write it explicitly rather than deflecting.';
   // The image model sees only the scene text, so intimate panels must say plainly what is on show, in the tag words anime models know.
-  const ADULT_PANELS = ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully. The scene text is all the illustrator sees: in intimate panels, state plainly who is nude or partly undressed and what sexual act is shown, with short tag words (nsfw, nude, topless, sex, oral, cum, etc.) instead of euphemisms.';
+  const ADULT_PANELS = ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully. The scene text is all the illustrator sees: in intimate panels, state plainly who is nude or partly undressed and what sexual act is shown, with short tag words (nsfw, nude, topless, sex, oral, cum, etc.) instead of euphemisms. In an intimate panel, list both partners under characters and put the act and the positions of both partners first in tags (e.g. fellatio, kneeling, standing, from side), so both people are drawn.';
   const SPICE = {
     adult: { label: 'Adult', hint: 'Explicit when the story calls for it.', story: ADULT_STORY, chat: ADULT_CHAT, panels: ADULT_PANELS, image: '' },
     kinky: { label: 'Kinky', hint: 'More heat, more often, with kinks and dirty talk.',
@@ -436,10 +436,11 @@
     const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
     const system = 'You adapt prose into a vertical-scroll manhwa (webtoon). Reply with JSON only, no markdown.';
     const n = panelCount(story.text);
-    const user = `Characters: ${chars.map((c) => c.name).join(', ') || '(none named)'}\n\nStory "${story.title}":\n"""${story.text.slice(0, 60000)}"""\n\n` +
+    const user = `Characters:\n${chars.map((c) => `- ${c.name}${c.appearance ? ': ' + c.appearance.slice(0, 300) : ''}`).join('\n') || '(none named)'}\n\nStory "${story.title}":\n"""${story.text.slice(0, 60000)}"""\n\n` +
       `Split it into about ${n} panels that follow the whole story in order, start to finish, without skipping scenes. Return JSON:\n` +
       '{"panels": [{"scene": "what the illustrator draws: setting, action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
-      '  "characters": ["names of the characters visible in this panel"], "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n' +
+      '  "tags": "8-15 comma-separated anime image tags for what is shown, most important first: the action, who does what to whom, poses, camera angle, then 4-6 short look tags per character present (hair, eyes, clothes, body), then the setting (e.g. kissing, hug, from side, sitting, long brown hair, red dress, cafe)",\n' +
+      '  "characters": ["names of every character in this panel, including anyone only partly in frame"], "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n' +
       'Use the exact character names above. Keep the text short; the pictures carry the story.' +
       spiceText(state.settings, 'panels');
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
@@ -448,11 +449,14 @@
   const panelCount = (text) => Math.min(40, Math.max(8, Math.round(String(text || '').split(/\s+/).length / 150)));
   const COMIC_STYLE = 'anime manhwa webtoon panel, 2d illustration, full color, clean line art, flat cel shading, anime eyes, detailed drawn background';
   // The image model knows nothing about the cast, so each visible character's name becomes their written appearance.
-  // Image models weigh the start of a prompt most, so the action comes first, then short looks, then the art style.
+  // Image models weigh the start of a prompt most, so the head count and action tags come first, then the scene, short looks and the art style.
   function panelPrompt(state, panel) {
     const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
-    const looks = who.map((c) => `${c.name}: ` + (c.appearance ? c.appearance.slice(0, 160) : 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person'))).join('. ');
-    return [str(panel && panel.scene), looks, COMIC_STYLE].filter(Boolean).join('. ').slice(0, 1500);
+    const looks = who.map((c) => `${c.name}: ` + (c.appearance ? c.appearance.slice(0, 100) : 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person'))).join('. ');
+    // Anime models are trained on head-count tags (1girl, 2boys), so without them a two-person act often comes out as one person.
+    const count = (g, word) => { const n = who.filter((c) => characterGender(c) === g).length; return n ? `${n}${word}${n > 1 ? 's' : ''}` : ''; };
+    const heads = [count('f', 'girl'), count('m', 'boy')].filter(Boolean).join(', ');
+    return [[heads, str(panel && panel.tags)].filter(Boolean).join(', '), str(panel && panel.scene), looks, COMIC_STYLE].filter(Boolean).join('. ').slice(0, 1500);
   }
   // A head-and-shoulders picture from the written appearance only; the name means nothing to the image model.
   const PORTRAIT_STYLE = 'anime portrait, head and shoulders, looking at viewer, manhwa webtoon style, 2d illustration, full color, clean line art, flat cel shading, anime eyes, simple soft background';

@@ -359,16 +359,17 @@ test('long-term memory leaves a list alone if it changed while the AI was conden
 
 test('comic panels swap names for written appearance in the image prompt', () => {
   const s = A.emptyState();
-  s.characters.push({ id: 'a', name: 'Ana', appearance: 'tall, red braid, green coat' });
+  s.characters.push({ id: 'a', name: 'Ana', appearance: 'tall, red braid, green coat', personality: 'she is calm' }, { id: 'b', name: 'Ben', personality: 'he is loud' });
   const panels = A.toPanels(s, { panels: [
-    { scene: 'Ana on a rainy pier at night', characters: ['ana', 'Nobody'], caption: 'Later.', dialogue: [{ name: 'Ana', line: 'Wait.' }, { name: 'x', line: '' }] },
+    { scene: 'Ana on a rainy pier at night', tags: 'hug, from side', characters: ['ana', 'Ben', 'Nobody'], caption: 'Later.', dialogue: [{ name: 'Ana', line: 'Wait.' }, { name: 'x', line: '' }] },
     { scene: '' },
   ] });
   assert.strictEqual(panels.length, 1);
   assert.match(panels[0].prompt, /anime manhwa/);
+  assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side\. Ana on a rainy pier/);
   assert.match(panels[0].prompt, /Ana: tall, red braid, green coat/);
   assert.deepStrictEqual(panels[0].dialogue, [{ name: 'Ana', line: 'Wait.' }]);
-  assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /Characters: Ana/);
+  assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /- Ana: tall, red braid/);
 });
 
 test('comic panel count follows story length', () => {
