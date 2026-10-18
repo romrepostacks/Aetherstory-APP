@@ -561,11 +561,11 @@ async function drawComfy(prompt, onWait, { width, height, nsfw, signal }) {
   const k = Math.sqrt(1024 * 1024 / (width * height)), px = (x) => Math.round((x * k) / 64) * 64; // SDXL models draw best near one megapixel
   const workflow = {
     1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
-    2: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: `${prompt}, anime style, 2d illustration, masterpiece, best quality` } },
+    2: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: `masterpiece, best quality, ${prompt}, anime style, 2d illustration` } },
     3: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: NEGATIVE + (nsfw ? '' : ', nsfw, nude') } },
     4: { class_type: 'EmptyLatentImage', inputs: { width: px(width), height: px(height), batch_size: 1 } },
     5: { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0],
-      seed: Math.floor(Math.random() * 2 ** 32), steps: 20, cfg: 6, sampler_name: 'euler_ancestral', scheduler: 'normal', denoise: 1 } },
+      seed: Math.floor(Math.random() * 2 ** 32), steps: 20, cfg: 7, sampler_name: 'euler_ancestral', scheduler: 'normal', denoise: 1 } },
     6: { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
     7: { class_type: 'PreviewImage', inputs: { images: ['6', 0] } }, // ComfyUI's temp folder: nothing piles up in its output folder
   };
