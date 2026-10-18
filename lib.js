@@ -438,8 +438,9 @@
     const n = panelCount(story.text);
     const user = `Characters:\n${chars.map((c) => `- ${c.name}${c.appearance ? ': ' + c.appearance.slice(0, 300) : ''}`).join('\n') || '(none named)'}\n\nStory "${story.title}":\n"""${story.text.slice(0, 60000)}"""\n\n` +
       `Split it into about ${n} panels that follow the whole story in order, start to finish, without skipping scenes. Return JSON:\n` +
-      '{"panels": [{"scene": "what the illustrator draws: setting, action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
-      '  "tags": "8-15 comma-separated anime image tags for what is shown, most important first: the action, who does what to whom, poses, camera angle, then 4-6 short look tags per character present (hair, eyes, clothes, body), then the setting (e.g. kissing, hug, from side, sitting, long brown hair, red dress, cafe)",\n' +
+      '{"looks": {"<character name>": "10-15 comma-separated anime tags fixing how this character always looks, from the description above: hair color and style, eye color, face, skin, body, age, usual outfit"},\n' +
+      ' "panels": [{"scene": "what the illustrator draws: setting, action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
+      '  "tags": "8-15 comma-separated anime image tags for what is shown, most important first: the action, who does what to whom, poses, camera angle, then the setting; looks come from \"looks\", so leave them out (e.g. kissing, hug, from side, sitting, cafe)",\n' +
       '  "characters": ["names of every character in this panel, including anyone only partly in frame"], "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n' +
       'Use the exact character names above. Keep the text short; the pictures carry the story.' +
       spiceText(state.settings, 'panels');
@@ -450,9 +451,11 @@
   const COMIC_STYLE = 'anime manhwa webtoon panel, 2d illustration, full color, clean line art, flat cel shading, anime eyes, detailed drawn background';
   // The image model knows nothing about the cast, so each visible character's name becomes their written appearance.
   // Image models weigh the start of a prompt most, so the head count and action tags come first, then the scene, short looks and the art style.
-  function panelPrompt(state, panel) {
+  // `tags` holds each character's fixed look tags for the whole comic, so hair and faces don't drift from panel to panel.
+  function panelPrompt(state, panel, tags = {}) {
     const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
-    const looks = who.map((c) => `${c.name}: ` + (c.appearance ? c.appearance.slice(0, 100) : 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person'))).join('. ');
+    const lookOf = (c) => str(tags[Object.keys(tags).find((k) => k.toLowerCase() === c.name.toLowerCase())]);
+    const looks = who.map((c) => `${c.name}: ` + (lookOf(c) || (c.appearance ? c.appearance.slice(0, 100) : 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person')))).join('. ');
     // Anime models are trained on head-count tags (1girl, 2boys), so without them a two-person act often comes out as one person.
     const count = (g, word) => { const n = who.filter((c) => characterGender(c) === g).length; return n ? `${n}${word}${n > 1 ? 's' : ''}` : ''; };
     const heads = [count('f', 'girl'), count('m', 'boy')].filter(Boolean).join(', ');
@@ -466,7 +469,7 @@
   }
   function toPanels(state, r) {
     return (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 50).map((p) => ({
-      prompt: panelPrompt(state, p), caption: str(p.caption),
+      prompt: panelPrompt(state, p, r.looks && typeof r.looks === 'object' ? r.looks : {}), caption: str(p.caption),
       dialogue: (Array.isArray(p.dialogue) ? p.dialogue : []).filter((d) => d && str(d.line)).map((d) => ({ name: str(d.name), line: str(d.line) })),
     }));
   }

@@ -364,6 +364,7 @@ test('comic panels swap names for written appearance in the image prompt', () =>
     { scene: 'Ana on a rainy pier at night', tags: 'hug, from side', characters: ['ana', 'Ben', 'Nobody'], caption: 'Later.', dialogue: [{ name: 'Ana', line: 'Wait.' }, { name: 'x', line: '' }] },
     { scene: '' },
   ] });
+  assert.match(A.toPanels(s, { looks: { ana: 'red hair, green eyes' }, panels: [{ scene: 'x', characters: ['Ana'] }] })[0].prompt, /Ana: red hair, green eyes/);
   assert.strictEqual(panels.length, 1);
   assert.match(panels[0].prompt, /anime manhwa/);
   assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side\. Ana on a rainy pier/);
