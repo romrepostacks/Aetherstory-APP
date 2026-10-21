@@ -405,3 +405,23 @@ test('spice levels raise the heat in stories, chats and comic pictures, and do n
   assert.equal(A.spiceText(s.settings, 'story'), '');
   assert.equal(A.spiceText(s.settings, 'image'), '');
 });
+
+test('parseSSE keeps a closing full-message chunk apart from the deltas', () => {
+  const r = A.parseSSE('data: {"choices":[{"delta":{"content":"Hi"}}]}\ndata: {"choices":[{"delta":{},"message":{"content":"Hi"}}]}\n');
+  assert.deepEqual(r.tokens, ['Hi']);
+  assert.equal(r.whole, 'Hi');
+});
+
+test('trimRepeat cuts a story that starts over and a retyped story so far', () => {
+  const open = 'Rain hammered the harbor as Ana pulled her coat tighter and watched the last ferry slip away into the fog.';
+  const story = `${open} She turned to Ben. "We missed it."\n\n${open.replace('harbor as', 'harbor  as')} She turned`;
+  assert.equal(A.trimRepeat(story), `${open} She turned to Ben. "We missed it."`);
+  const before = `Morning came slowly. ${open} Ben laughed.`;
+  assert.equal(A.trimRepeat(`${open}\nBen laughed.\n\nBy noon the sun was out.`, before), 'By noon the sun was out.');
+  assert.equal(A.trimRepeat('By noon the sun was out and the gulls had come back to the pier, loud and hungry.', before), 'By noon the sun was out and the gulls had come back to the pier, loud and hungry.');
+});
+
+test('Spice has no Off: old Off libraries open at a level', () => {
+  assert.equal(A.normalizeState({ settings: { mature: false } }).settings.mature, true);
+  assert.match(A.SPICE.kinky.label, /experimental/);
+});
