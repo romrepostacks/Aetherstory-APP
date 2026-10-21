@@ -28,6 +28,9 @@
         spice: 'adult', // how explicit stories and pictures get while mature is on: adult | kinky | nympho (SPICE)
         comfyUrl: '', // the user's own ComfyUI (e.g. http://127.0.0.1:8189): pictures drawn on their PC, AI Horde as backup
         comfyModel: '', // checkpoint file in that ComfyUI; empty = the first one it lists
+        comfyNsfwModel: '', // checkpoint for explicit comic panels; empty = comfyModel
+        checkPictures: true, // the story AI looks at each comic panel and redraws one that doesn't match
+        devPrompts: false, // show each comic panel's prompt and checks under it
         setupDone: false, // first-run setup finished or skipped
       },
       characters: [],
@@ -432,43 +435,129 @@
   }
 
   // ---------- comic: a story as manhwa-style panels, each drawn from a scene description plus how its characters look ----------
-  function buildPanelMessages(state, story) {
+  // Free models lose the thread on a whole long story, so it is planned a part at a time (about 1500 words, cut at paragraphs), in order.
+  function comicParts(text, size = 1500) {
+    const parts = [];
+    let cur = [], words = 0;
+    for (const para of String(text || '').split(/\n\s*\n/).filter((p) => p.trim())) {
+      cur.push(para); words += para.split(/\s+/).length;
+      if (words >= size) { parts.push(cur.join('\n\n')); cur = []; words = 0; }
+    }
+    if (cur.length) parts.push(cur.join('\n\n'));
+    return parts;
+  }
+  const wordCount = (t) => String(t || '').split(/\s+/).filter(Boolean).length;
+  // Each character's sheet as the planner and checker see it: fixed body tags first, so every panel gets the same build.
+  const castSheet = (chars) => chars.map((c) => `- ${c.name}: ${[c.lookTags && 'body (never changes): ' + c.lookTags, c.appearance && c.appearance.slice(0, 400), c.personality && 'personality: ' + c.personality.slice(0, 200)].filter(Boolean).join('. ')}`).join('\n') || '(none named)';
+  const PANEL_FIELDS = '{"panels": [{"quote": "6-12 words copied exactly from the story text this panel shows",\n' +
+    '  "scene": "what the illustrator draws: action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
+    '  "setting": "where this happens, the same words every panel in that place (e.g. office, desk, window, night)",\n' +
+    '  "tags": "6-12 comma-separated anime image tags for the action, poses and camera angle, most important first (e.g. sitting, typing, from side). No hair, eyes or body tags: those come from the cast list",\n' +
+    '  "characters": ["names of every character in this panel, including anyone only partly in frame"],\n' +
+    '  "clothes": {"name": "what they wear in this panel as tags, the same outfit until the story changes it"},\n' +
+    '  "explicit": false, "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n';
+  // part: one piece of comicParts(story.text); n: panels for it; prev: the panel before it, so places and outfits carry over.
+  function buildPanelMessages(state, story, part = story.text, n = panelCount(story.text), prev = null, where = '') {
     const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
     const system = 'You adapt prose into a vertical-scroll manhwa (webtoon). Reply with JSON only, no markdown.';
-    const n = panelCount(story.text);
-    const user = `Characters:\n${chars.map((c) => `- ${c.name}${c.appearance ? ': ' + c.appearance.slice(0, 300) : ''}`).join('\n') || '(none named)'}\n\nStory "${story.title}":\n"""${story.text.slice(0, 60000)}"""\n\n` +
-      `Split it into about ${n} panels that follow the whole story in order, start to finish, without skipping scenes. Return JSON:\n` +
-      '{"panels": [{"scene": "what the illustrator draws: setting, action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
-      '  "tags": "8-15 comma-separated anime image tags for what is shown, most important first: the action, who does what to whom, poses, camera angle, then 4-6 short look tags per character present (hair, eyes, clothes, body), then the setting (e.g. kissing, hug, from side, sitting, long brown hair, red dress, cafe)",\n' +
-      '  "characters": ["names of every character in this panel, including anyone only partly in frame"], "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n' +
-      'Use the exact character names above. Keep the text short; the pictures carry the story.' +
+    const user = `Characters:\n${castSheet(chars)}\n\n` + (prev ? `The panel just before this part: ${prev.setting ? prev.setting + '. ' : ''}${prev.scene} (${(prev.characters || []).join(', ')})\n\n` : '') +
+      `Story "${story.title}"${where}:\n"""${String(part).slice(0, 20000)}"""\n\n` +
+      `Split this text into about ${n} panels that follow it in order, start to finish, without skipping or repeating scenes. Return JSON:\n` + PANEL_FIELDS +
+      'Use the exact character names above and only characters who are actually in the scene. Keep the text short; the pictures carry the story. ' +
+      'Set "explicit" true only for a panel that shows nudity or sex. Everything else (working, talking, walking, eating, even flirting) is explicit false and everyone in it is clothed.' +
       spiceText(state.settings, 'panels');
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
   }
+  // Second pass over one part's plan: wrong order, scenes not in the text, missing or extra people, nudity where nobody is undressed.
+  function buildPanelCheckMessages(state, story, part, panels) {
+    const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
+    const list = panels.map((p, i) => JSON.stringify({ panel: i + 1, quote: p.quote, scene: p.scene, setting: p.setting, characters: p.characters, clothes: p.clothes, explicit: p.explicit })).join('\n');
+    const user = `Characters:\n${castSheet(chars)}\n\nStory text:\n"""${String(part).slice(0, 20000)}"""\n\nComic panels planned for this text:\n${list}\n\n` +
+      'Fact-check the panels against the story text and the characters. Fix any panel that is out of story order, shows something that does not happen in the text, has the wrong people in it, ' +
+      'has someone wearing or doing something that contradicts the text, or is marked explicit when nobody in it is undressed (or not explicit when they are). ' +
+      'Return JSON: {"order": [panel numbers in correct story order], "fixes": [{"panel": 1, plus only the fields that change: "scene", "setting", "tags", "characters", "clothes", "explicit"}]}. ' +
+      'Return {"order": [], "fixes": []} when everything is right.';
+    return [{ role: 'system', content: 'You are a careful comic editor. Reply with JSON only, no markdown.' }, { role: 'user', content: user }];
+  }
+  function applyPanelCheck(panels, r) {
+    for (const f of Array.isArray(r && r.fixes) ? r.fixes : []) {
+      const p = panels[Number(f && f.panel) - 1];
+      if (!p) continue;
+      for (const k of ['scene', 'setting', 'tags']) if (str(f[k])) p[k] = str(f[k]);
+      if (strList(f.characters).length) p.characters = strList(f.characters);
+      if (f.clothes && typeof f.clothes === 'object') p.clothes = { ...p.clothes, ...f.clothes };
+      if (typeof f.explicit === 'boolean') p.explicit = f.explicit;
+    }
+    const order = (Array.isArray(r && r.order) ? r.order : []).map((x) => panels[Number(x) - 1]);
+    // Only a full reordering is trusted; a partial list would drop panels.
+    return order.length === panels.length && new Set(order).size === panels.length && order.every(Boolean) ? order : panels;
+  }
   // About one panel per 150 words, like a webtoon episode: a 3000-word story gets 20.
-  const panelCount = (text) => Math.min(40, Math.max(8, Math.round(String(text || '').split(/\s+/).length / 150)));
+  const panelCount = (text) => Math.min(40, Math.max(8, Math.round(wordCount(text) / 150)));
   const COMIC_STYLE = 'anime manhwa webtoon panel, 2d illustration, full color, clean line art, flat cel shading, anime eyes, detailed drawn background';
-  // The image model knows nothing about the cast, so each visible character's name becomes their written appearance.
-  // Image models weigh the start of a prompt most, so the head count and action tags come first, then the scene, short looks and the art style.
+  const gendered = (c, f, m, x) => ({ f, m }[characterGender(c)] || x);
+  // Fixed body tags per character, written once from their sheet and reused in every panel so build, size and face don't drift.
+  // lookFrom remembers the appearance they came from, so editing the character makes new ones.
+  const needsLook = (c) => !!c.appearance && (!c.lookTags || c.lookFrom !== c.appearance);
+  function buildLookMessages(chars) {
+    const user = `Characters:\n${chars.map((c) => `- ${c.name}: ${c.appearance}`).join('\n')}\n\n` +
+      'For each character write 12-20 comma-separated anime image tags for how their body and face look, so an illustrator draws them the same in every picture: ' +
+      'gender tag (1girl or 1boy), age (e.g. adult, mature male), body build and size first and specific (e.g. muscular, broad shoulders, tall, chubby, slim, petite, curvy, large breasts), ' +
+      'skin tone, hair colour, length and style, eye colour, facial hair, and lasting features (tattoos, scars, glasses, piercings). No clothes, no pose, no names. ' +
+      'Return JSON: {"looks": {"exact name": "tags"}}';
+    return [{ role: 'system', content: 'You write consistent character tags for anime image models. Reply with JSON only, no markdown.' }, { role: 'user', content: user }];
+  }
+  function applyLooks(chars, r) {
+    const looks = (r && r.looks) || {};
+    for (const c of chars) {
+      const k = Object.keys(looks).find((n) => n.toLowerCase() === c.name.toLowerCase());
+      if (k && str(looks[k])) { c.lookTags = str(looks[k]); c.lookFrom = c.appearance; }
+    }
+  }
+  // The image model knows nothing about the cast, so each visible character's name becomes their fixed body tags plus this panel's clothes.
+  // Image models weigh the start of a prompt most, so the head count and action tags come first, then the scene, looks and the art style.
   function panelPrompt(state, panel) {
     const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
-    const looks = who.map((c) => `${c.name}: ` + (c.appearance ? c.appearance.slice(0, 100) : 'a ' + (characterGender(c) === 'f' ? 'woman' : characterGender(c) === 'm' ? 'man' : 'person'))).join('. ');
+    const clothes = (c) => { const v = (panel.clothes || {})[Object.keys(panel.clothes || {}).find((n) => n.toLowerCase() === c.name.toLowerCase())]; return str(v); };
+    const looks = who.map((c) => `(${c.lookTags || (c.appearance ? c.appearance.slice(0, 160) : gendered(c, 'a woman', 'a man', 'a person'))}${clothes(c) ? ', wearing ' + clothes(c) : ''})`).join(' and ');
     // Anime models are trained on head-count tags (1girl, 2boys), so without them a two-person act often comes out as one person.
     const count = (g, word) => { const n = who.filter((c) => characterGender(c) === g).length; return n ? `${n}${word}${n > 1 ? 's' : ''}` : ''; };
-    const heads = [count('f', 'girl'), count('m', 'boy')].filter(Boolean).join(', ');
-    return [[heads, str(panel && panel.tags)].filter(Boolean).join(', '), str(panel && panel.scene), looks, COMIC_STYLE].filter(Boolean).join('. ').slice(0, 1500);
+    const heads = [count('f', 'girl'), count('m', 'boy')].filter(Boolean).join(', ') || (who.length ? '' : 'no humans');
+    return [[heads, str(panel && panel.tags), panel && panel.explicit === false ? 'clothed' : ''].filter(Boolean).join(', '),
+      str(panel && panel.scene), str(panel && panel.setting), looks, COMIC_STYLE].filter(Boolean).join('. ').slice(0, 1500);
   }
   // A head-and-shoulders picture from the written appearance only; the name means nothing to the image model.
   const PORTRAIT_STYLE = 'anime portrait, head and shoulders, looking at viewer, manhwa webtoon style, 2d illustration, full color, clean line art, flat cel shading, anime eyes, simple soft background';
   function portraitPrompt(c) {
-    const g = characterGender(c);
-    return [PORTRAIT_STYLE, str(c && c.appearance) || `a ${g === 'f' ? 'woman' : g === 'm' ? 'man' : 'person'}`, 'fully clothed'].join('. ').slice(0, 1500);
+    return [PORTRAIT_STYLE, str(c && c.appearance) || gendered(c, 'a woman', 'a man', 'a person'), 'fully clothed'].join('. ').slice(0, 1500);
   }
-  function toPanels(state, r) {
-    return (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 50).map((p) => ({
-      prompt: panelPrompt(state, p), caption: str(p.caption),
-      dialogue: (Array.isArray(p.dialogue) ? p.dialogue : []).filter((d) => d && str(d.line)).map((d) => ({ name: str(d.name), line: str(d.line) })),
-    }));
+  // Planned panels keep their parts (scene, characters, clothes...) so the prompt is rebuilt at draw time from the latest looks.
+  // part: the text they were planned from; panels are sorted by where their quote sits in it, so they can't come out of story order.
+  function toPanels(state, r, part = '') {
+    const at = (q) => { const i = q ? String(part).toLowerCase().indexOf(q.toLowerCase()) : -1; return i; };
+    let last = 0;
+    const panels = (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 50).map((p) => {
+      const panel = { quote: str(p.quote), scene: str(p.scene), setting: str(p.setting), tags: str(p.tags), characters: strList(p.characters),
+        clothes: p.clothes && typeof p.clothes === 'object' && !Array.isArray(p.clothes) ? Object.fromEntries(Object.entries(p.clothes).filter(([, v]) => str(v)).map(([k, v]) => [k, str(v)])) : {},
+        explicit: p.explicit === true, caption: str(p.caption),
+        dialogue: (Array.isArray(p.dialogue) ? p.dialogue : []).filter((d) => d && str(d.line)).map((d) => ({ name: str(d.name), line: str(d.line) })) };
+      const i = at(panel.quote);
+      panel.pos = (last = i >= 0 ? i : last); // no exact quote: stays right after the panel before it
+      return panel;
+    });
+    panels.sort((a, b) => a.pos - b.pos); // stable: equal positions keep the AI's order
+    for (const p of panels) { delete p.pos; p.prompt = panelPrompt(state, p); }
+    return panels;
+  }
+  // The picture check: a vision model compares the drawn panel with what it should show.
+  function buildPictureCheckMessages(state, panel, img) {
+    const who = strList(panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
+    const text = `This is a drawn comic panel. It should show: ${panel.scene}${panel.setting ? ' Setting: ' + panel.setting + '.' : ''}\n` +
+      `People in it (${who.length || 'none'}): ${who.map((c) => `${c.name}: ${c.lookTags || c.appearance || ''}`).join('; ') || 'none'}.\n` +
+      (panel.explicit ? 'It is an intimate adult scene, so nudity is expected.\n' : 'Nobody in it should be nude or sexual.\n') +
+      'Does the picture match? Check the number of people, each person\'s body build, hair and features, the action, and whether nudity matches. Small style differences are fine. ' +
+      'Reply with JSON only: {"ok": true} or {"ok": false, "problem": "what is wrong, in under 20 words"}';
+    return [{ role: 'user', content: [{ type: 'text', text }, { type: 'image_url', image_url: { url: img } }] }];
   }
 
   // ---------- world revision: one plain-words change, applied to the cast, the bible and every saved story ----------
@@ -744,6 +833,7 @@
 
   const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
     SPICE, spiceText, memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, portraitPrompt, toPanels,
+    comicParts, buildPanelCheckMessages, applyPanelCheck, needsLook, buildLookMessages, applyLooks, buildPictureCheckMessages,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
