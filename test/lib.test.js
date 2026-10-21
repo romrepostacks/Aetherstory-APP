@@ -366,10 +366,47 @@ test('comic panels swap names for written appearance in the image prompt', () =>
   ] });
   assert.strictEqual(panels.length, 1);
   assert.match(panels[0].prompt, /anime manhwa/);
-  assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side\. Ana on a rainy pier/);
-  assert.match(panels[0].prompt, /Ana: tall, red braid, green coat/);
+  assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side, clothed\. Ana on a rainy pier/);
+  assert.match(panels[0].prompt, /\(tall, red braid, green coat\) and \(a man\)/);
+  assert.doesNotMatch(panels[0].prompt, /Ana:/);
   assert.deepStrictEqual(panels[0].dialogue, [{ name: 'Ana', line: 'Wait.' }]);
   assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /- Ana: tall, red braid/);
+});
+
+test('comic panels keep story order, fixed body tags, scene clothes, and are explicit only when marked', () => {
+  const s = A.emptyState();
+  s.characters.push({ id: 'a', name: 'Ana', appearance: 'tall, red braid', lookTags: '1girl, adult, muscular, tall, red braid', lookFrom: 'tall, red braid', personality: 'she' });
+  const part = 'Ana sat alone at her desk typing a report. Later she kissed him on the pier under the rain.';
+  const panels = A.toPanels(s, { panels: [
+    { quote: 'she kissed him on the pier', scene: 'kiss on pier', characters: ['Ana'], explicit: true },
+    { quote: 'sat alone at her desk typing', scene: 'Ana at her desk', setting: 'office', tags: 'sitting, typing', characters: ['Ana'], clothes: { ana: 'white blouse' } },
+    { quote: 'Under the RAIN', scene: 'rain close-up', characters: [] },
+  ] }, part);
+  assert.deepStrictEqual(panels.map((p) => p.scene), ['Ana at her desk', 'kiss on pier', 'rain close-up']);
+  assert.match(panels[0].prompt, /^1girl, sitting, typing, clothed\. Ana at her desk\. office\. \(1girl, adult, muscular, tall, red braid, wearing white blouse\)/);
+  assert.strictEqual(panels[1].explicit, true);
+  assert.doesNotMatch(panels[1].prompt, /clothed/);
+  assert.match(panels[2].prompt, /^no humans/);
+  // the check pass can fix fields and reorder, but a partial order is ignored
+  const fixed = A.applyPanelCheck(panels.slice(), { order: [2, 1, 3], fixes: [{ panel: 2, explicit: false, scene: 'a hug on the pier' }, { panel: 9, scene: 'x' }] });
+  assert.deepStrictEqual(fixed.map((p) => p.scene), ['a hug on the pier', 'Ana at her desk', 'rain close-up']);
+  assert.strictEqual(fixed[0].explicit, false);
+  assert.strictEqual(A.applyPanelCheck(panels, { order: [1, 1, 2] }), panels);
+  // looks are remade when the appearance changes
+  assert.strictEqual(A.needsLook(s.characters[0]), false);
+  s.characters[0].appearance = 'short, black bob';
+  assert.strictEqual(A.needsLook(s.characters[0]), true);
+  A.applyLooks(s.characters, { looks: { ANA: '1girl, petite, black bob' } });
+  assert.strictEqual(s.characters[0].lookTags, '1girl, petite, black bob');
+  assert.strictEqual(A.needsLook(s.characters[0]), false);
+});
+
+test('long stories are planned in paragraph-aligned parts', () => {
+  const para = Array(500).fill('word').join(' ');
+  const parts = A.comicParts([para, para, para, para, para].join('\n\n'));
+  assert.strictEqual(parts.length, 2);
+  assert.strictEqual(parts.join('\n\n').split(/\s+/).length, 2500);
+  assert.deepStrictEqual(A.comicParts('short'), ['short']);
 });
 
 test('comic panel count follows story length', () => {
