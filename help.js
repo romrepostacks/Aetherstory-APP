@@ -22,8 +22,8 @@
         'Paste your AI key on the new device too (Settings → AI & writing). Keys never travel in backups.'] ] },
     { id: 'spice', title: 'Spice: how explicit stories get', body: [
       'The Spice slider (on the Write tab and in Settings → AI & writing) sets how sexual stories, character chats and comic pictures are.',
-      ['Off: no explicit scenes.', 'Adult: explicit when the story calls for it. This is how stories have always been written.',
-        'Kinky: more heat and more often, with kinks and dirty talk that fit the characters.', 'Nympho: sex is the heart of every story, with several graphic scenes.'],
+      ['Adult: explicit when the story calls for it. This is how stories have always been written.',
+        'Kinky (experimental): more heat and more often, with kinks and dirty talk that fit the characters.', 'Nympho (experimental): sex is the heart of every story, with several graphic scenes.'],
       'Free story AIs sometimes soften scenes anyway. Venice and Euryale (paid, under Settings → AI & writing → Advanced mode) follow it most closely. Portraits are always drawn clothed.'] },
     { id: 'horde', title: 'Shorter waits for pictures with AI Horde', body: [
       'Comic panels and portraits are drawn for free by AI Horde, a network of volunteer computers, so a picture can take a minute or more. A free account puts you ahead of anonymous users.',
@@ -69,6 +69,8 @@
     { q: '"function id not found" or a 404 from the free model', a: ['The free model\'s provider went down. The app automatically tries two backup free models, so just tap Generate again. If it keeps happening, pick another model in Settings → AI & writing → Advanced mode.'] },
     { q: '"Private mode is on and no private provider serves this model"', a: ['Free models are usually run by providers that keep prompts, so Private mode blocks them. Turn Private mode off, or pick a paid model in Advanced mode.'] },
     { q: 'Stories come out tamer than the Spice setting', a: ['Free models sometimes soften scenes. Raise Spice, or use Venice or Euryale (paid, in Advanced mode), which follow it most closely.'] },
+    { q: 'A story repeats itself or starts over halfway through', a: ['Fixed: some AI providers send the whole story a second time when they finish, and models sometimes lose their place and restart. The app now drops the repeat. Stories written before the update keep the repeat, so write those again.'] },
+    { q: 'A story gets someone\'s looks, personality or the world wrong', a: ['After writing, the app checks the story twice: once against the world notes, personalities and traits, and once against how everyone looks, and fixes what doesn\'t match. If something is still off, fix the character sheet (Cast tab) so the next story follows it, or use Revise on the World tab.'] },
     { q: 'The app crashed reading a reply, or showed a blank error', a: ['Fixed: some providers send an error in a normal-looking reply. The app now shows it as a message. Make sure the app is up to date (see "New features don\'t show up").'] },
     { q: 'New features don\'t show up', a: ['Close the app completely (swipe it away) and open it again. On a PC, refresh the page twice.'] },
     { q: 'My stories disappeared on my phone', a: ['Phones can clear websites that aren\'t installed or haven\'t been opened in a while. Install the app (see "Install the app on your phone or PC") and keep backups. Import your latest backup to get everything back.'] },

@@ -148,6 +148,7 @@ async function chatOnce(messages, { onToken, signal, stream = true, use } = {}) 
     buf = out.rest;
     if (out.error) throw out.error;
     for (const t of out.tokens) { full += t; onToken && onToken(t); }
+    if (out.whole && !full) { full = out.whole; onToken && onToken(full); } // only for providers that never streamed deltas
     if (out.done) break;
   }
   return full;
@@ -381,29 +382,56 @@ async function generate(continueId) {
   const cast = ui.selected.length ? [...ui.selected] : state.characters.map((c) => c.id);
   const story = existing || { id: A.uid(), title: 'Untitled story', summary: '', characterIds: cast, pov: cast.includes(ui.pov) ? ui.pov : '', premise: ui.premise, text: '', createdAt: Date.now() };
   const messages = A.buildStoryMessages(state, { characterIds: story.characterIds, premise: ui.premise, length: ui.length, continueStory: existing, pov: story.pov });
+  const target = A.LENGTHS[ui.length] || A.LENGTHS.medium;
+  const j = startJob(existing ? 'Continuing your story' : 'Writing your story',
+    ['Sending your prompt', 'Writing the story', 'Checking world lore, personality and traits', 'Checking physical descriptions', 'Updating your world']);
+  if (!j) return;
   if (!existing) state.stories.push(story);
-  else story.text += '\n\n';
-  ui.busy = true; ui.currentId = story.id; ui.abort = new AbortController();
+  const before = story.text;
+  let part = '', words = 0;
+  const keep = () => { story.text = (before ? before + '\n\n' : '') + part; const out = document.getElementById('output'); if (out) out.textContent = story.text; };
+  ui.busy = true; ui.currentId = story.id; ui.abort = { abort: closeJob }; ui.status = '';
   go('write');
-  setStatus('Writing…');
-  const out = document.getElementById('output');
-  out.textContent = story.text;
+  j.step(0, `Sending ${story.characterIds.length ? `${story.characterIds.length} character sheets, ` : ''}your world notes and the premise to your AI.`);
+  // Cancel keeps what was written so far.
+  const stopped = async () => { part = part.trim(); if (!part && !existing) state.stories = state.stories.filter((s) => s !== story); else { keep(); story.updatedAt = Date.now(); await save(); } finish(); };
   try {
-    await chat(messages, { signal: ui.abort.signal, onToken: (t) => { story.text += t; out.textContent = story.text; } });
+    await chat(messages, { signal: j.signal, onToken: (t) => {
+      if (!part) j.step(1, 'The AI is writing.');
+      part += t; keep();
+      const n = part.split(/\s+/).length;
+      if (n - words >= 10) { words = n; j.note(`${n} of about ${target} words written.`, Math.min(n / target, 0.95)); }
+    } });
   } catch (e) {
-    if (e.name !== 'AbortError') { setStatus(e.message); if (!story.text.trim()) state.stories = state.stories.filter((s) => s !== story); finish(); return; }
+    if (!j.signal.aborted) { ui.status = e.message; j.end(e); }
+    return stopped();
   }
-  story.text = story.text.trim();
+  part = A.trimRepeat(part.trim(), before);
+  keep();
   story.updatedAt = Date.now();
   await save();
-  setStatus('Updating your world from this story…');
-  try {
-    const changes = A.applyWorldUpdate(state, story, await chatJson(A.buildWorldUpdateMessages(state, story)));
-    await save();
-    setStatus(changes.length ? 'World updated: ' + changes.join(', ') : 'Saved. Nothing new for the world this time.');
-  } catch (e) {
-    setStatus('Story saved, but the world update failed: ' + e.message);
+  // Second pass: two focused checks against the sheets and the bible, fixed in place with exact edits.
+  let fixed = 0;
+  for (const [i, kind, what] of [[2, 'lore', 'world lore, personalities and traits'], [3, 'looks', 'how everyone looks']]) {
+    j.step(i, `Comparing the story with ${what}.`);
+    try {
+      const { text, applied } = A.applyEdits(part, (await chatJson(A.buildCheckMessages(state, story, part, kind), { signal: j.signal })).edits);
+      part = text; fixed += applied.length; keep();
+      j.note(applied.length ? `Fixed ${applied.length} ${applied.length === 1 ? 'slip' : 'slips'}.` : 'Everything matches.');
+    } catch (e) { if (j.signal.aborted) return stopped(); /* best effort: the story stays as written */ }
   }
+  await save();
+  j.step(4, 'Looking for new facts, places, relationships and character developments.');
+  const checked = fixed ? ` Fixed ${fixed} continuity ${fixed === 1 ? 'slip' : 'slips'}.` : '';
+  try {
+    const changes = A.applyWorldUpdate(state, story, await chatJson(A.buildWorldUpdateMessages(state, story), { signal: j.signal }));
+    await save();
+    ui.status = (changes.length ? 'World updated: ' + changes.join(', ') + '.' : 'Saved. Nothing new for the world this time.') + checked;
+  } catch (e) {
+    if (j.signal.aborted) return finish();
+    ui.status = 'Story saved, but the world update failed: ' + e.message + checked;
+  }
+  j.end();
   await condenseMemory();
   await autoBackup().catch(() => {});
   finish();
@@ -476,8 +504,9 @@ function startJob(title, steps) {
   const j = job = { title, steps: steps.map((label) => ({ label, state: 'wait' })), detail: '', error: '', started: Date.now(), hidden: false, signal: ctl.signal,
     cancel: () => ctl.abort(),
     // Step i is running, everything before it is done. `detail` says what's happening in plain words.
-    step: (i, detail = '') => { if (job !== j || j.error) return; j.steps.forEach((x, k) => { x.state = k < i ? 'ok' : k === i ? 'run' : 'wait'; }); j.detail = detail; drawJob(); },
-    note: (detail) => { if (job !== j || j.error) return; j.detail = detail; drawJob(); },
+    step: (i, detail = '') => { if (job !== j || j.error) return; j.steps.forEach((x, k) => { x.state = k < i ? 'ok' : k === i ? 'run' : 'wait'; }); j.detail = detail; j.frac = 0; drawJob(); },
+    // `frac` (0-1): how far the running step is, for the percentage.
+    note: (detail, frac) => { if (job !== j || j.error) return; j.detail = detail; if (frac !== undefined) j.frac = frac; drawJob(); },
     end: (err) => {
       if (job !== j) return;
       if (!err || ctl.signal.aborted) { job = null; return drawJob(); }
@@ -496,8 +525,9 @@ function drawJob() {
   el.hidden = !job || job.hidden; pill.hidden = !job || !job.hidden;
   if (!job) return el.replaceChildren();
   const j = job, now = j.steps.find((x) => x.state === 'run');
-  const time = h('span', { class: 'muted' }, fmtSecs((Date.now() - j.started) / 1000));
-  if (!j.error) jobTimer = setInterval(() => { time.textContent = fmtSecs((Date.now() - j.started) / 1000); }, 1000);
+  const pct = Math.round(100 * (j.steps.filter((x) => x.state === 'ok').length + (now ? j.frac || 0 : 0)) / j.steps.length) + '% · ';
+  const time = h('span', { class: 'muted' }, pct + fmtSecs((Date.now() - j.started) / 1000));
+  if (!j.error) jobTimer = setInterval(() => { time.textContent = pct + fmtSecs((Date.now() - j.started) / 1000); }, 1000);
   pill.replaceChildren(h('span', { class: 'spinner' }), `${j.title}${now ? ' · ' + now.label : ''}`);
   pill.onclick = () => { j.hidden = false; drawJob(); };
   const icon = { wait: '○', ok: '✓', fail: '✗' };
@@ -897,7 +927,7 @@ const VIEWS = {
       const pov = h('select', { onchange: (e) => { ui.pov = e.target.value; } },
         h('option', { value: '' }, 'Narrator (third person)'),
         state.characters.filter((c) => castIds.includes(c.id)).map((c) => h('option', { value: c.id, selected: ui.pov === c.id }, `${c.name} (first person)`)));
-      const spiceName = state.settings.mature ? (A.SPICE[state.settings.spice] || {}).label || 'Adult' : 'Off';
+      const spiceName = (A.SPICE[state.settings.spice] || A.SPICE.adult).label;
       nodes.push(box('', ...field('Premise or direction', premise),
         h('details', { open: ui.moreOpts, ontoggle: (e) => { ui.moreOpts = e.target.open; } },
           h('summary', {}, `Story options · ${ui.length}, ${ui.pov ? charName(ui.pov) + "'s view" : 'narrator'}, spice ${spiceName}`),
@@ -1189,17 +1219,17 @@ const SETTINGS = [['ai', '🤖', 'AI & writing', 'Your AI key, Spice, story inst
 const richText = (t) => String(t).replaceAll('{ORIGIN}', location.origin).split('`').map((part, i) => (i % 2 ? h('code', {}, part) : part));
 const helpBody = (body) => body.map((b) => (Array.isArray(b) ? h('ol', { class: 'steps help' }, b.map((x) => h('li', {}, richText(x)))) : h('p', { class: 'help' }, richText(b))));
 
-// Spice: Off (no explicit scenes) plus lib's three levels. Off is the old Mature checkbox turned off.
-const SPICE_STEPS = [['off', 'Off', 'No explicit scenes.'], ...Object.entries(A.SPICE).map(([k, v]) => [k, v.label, v.hint])];
+// Spice: lib's three levels. There's no Off any more; mature stays on.
+const SPICE_STEPS = Object.entries(A.SPICE).map(([k, v]) => [k, v.label, v.hint]);
 function spiceControl() {
   const s = state.settings;
-  const at = s.mature ? Math.max(1, SPICE_STEPS.findIndex(([k]) => k === s.spice)) : 0;
+  const at = Math.max(0, SPICE_STEPS.findIndex(([k]) => k === s.spice));
   const note = h('p', { class: 'muted' });
   const show = (i) => { note.textContent = `${SPICE_STEPS[i][1]}: ${SPICE_STEPS[i][2]}`; };
   show(at);
   return [h('label', {}, 'Spice (stories, chats and comic pictures)'),
     h('input', { type: 'range', class: 'spice', min: 0, max: SPICE_STEPS.length - 1, step: 1, value: at, 'aria-label': 'Spice level', oninput: (e) => show(+e.target.value),
-      onchange: (e) => { const i = +e.target.value; s.mature = i > 0; if (i) s.spice = SPICE_STEPS[i][0]; save(); } }),
+      onchange: (e) => { s.mature = true; s.spice = SPICE_STEPS[+e.target.value][0]; save(); } }),
     h('div', { class: 'ticks' }, SPICE_STEPS.map(([, label]) => h('span', {}, label))), note];
 }
 

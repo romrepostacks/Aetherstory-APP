@@ -57,7 +57,8 @@
     return {
       settings: Object.assign(base.settings, s.settings,
         RETIRED[s.settings && s.settings.model] ? { model: RETIRED[s.settings.model] } : {},
-        s.settings && s.settings.baseUrl === BUILTIN ? { baseUrl: base.settings.baseUrl, model: base.settings.model } : {}),
+        s.settings && s.settings.baseUrl === BUILTIN ? { baseUrl: base.settings.baseUrl, model: base.settings.model } : {},
+        { mature: true }), // Spice has no Off any more, so an old "Off" library starts at Adult
       characters: Array.isArray(s.characters) ? s.characters : [],
       stories: Array.isArray(s.stories) ? s.stories : [],
       world: Object.assign(base.world, s.world),
@@ -196,11 +197,11 @@
   const ADULT_PANELS = ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully. The scene text is all the illustrator sees: in intimate panels, state plainly who is nude or partly undressed and what sexual act is shown, with short tag words (nsfw, nude, topless, sex, oral, cum, etc.) instead of euphemisms. In an intimate panel, list both partners under characters and put the act and the positions of both partners first in tags (e.g. fellatio, kneeling, standing, from side), so both people are drawn.';
   const SPICE = {
     adult: { label: 'Adult', hint: 'Explicit when the story calls for it.', story: ADULT_STORY, chat: ADULT_CHAT, panels: ADULT_PANELS, image: '' },
-    kinky: { label: 'Kinky', hint: 'More heat, more often, with kinks and dirty talk.',
+    kinky: { label: 'Kinky (experimental)', hint: 'More heat, more often, with kinks and dirty talk.',
       story: ADULT_STORY + ' Turn the heat up: build sexual tension from the first scene, include at least one explicit sex scene, and lean into kinks and dirty talk that fit the characters (dominance and submission, teasing, toys, roleplay, risky places). All characters are consenting adults.',
       chat: ADULT_CHAT + ' Be flirtatious and forward, and steer toward sex and kinks that fit you.',
       panels: ADULT_PANELS + ' Show the sexual tension and intimate scenes on the page instead of cutting away.', image: 'nsfw, sensual, erotic, lewd' },
-    nympho: { label: 'Nympho', hint: 'Sex is the heart of every story.',
+    nympho: { label: 'Nympho (experimental)', hint: 'Sex is the heart of every story.',
       story: ADULT_STORY + ' Make sex the heart of the story: the characters are insatiable and can barely keep their hands off each other, scenes turn sexual quickly and often, with several long, graphic encounters and filthy dialogue throughout. All characters are consenting adults.',
       chat: ADULT_CHAT + ' You are insatiable: be openly sexual, start things yourself and escalate eagerly.',
       panels: ADULT_PANELS + ' Draw the intimate scenes explicitly and give them several panels.', image: 'nsfw, explicit, erotic, nude, sex' },
@@ -247,6 +248,53 @@
         (chars.length ? ` featuring ${chars.map((c) => c.name).join(', ')}` : '') + '. ' +
         (premise ? `Premise: ${premise}` : 'Choose a fresh premise that fits the world and moves these characters forward.') + guide;
     }
+    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+  }
+
+  // Models sometimes lose their place and start the story over (or, when continuing, retype the story so far).
+  // Cuts the new text where its opening comes back, and drops a retyped copy of the story so far from its start.
+  function trimRepeat(text, before = '') {
+    const flat = (t) => t.replace(/\s+/g, ' ').trim();
+    const head = flat(text).slice(0, 60);
+    if (head.length < 60) return text;
+    const prior = flat(before);
+    const at = prior.indexOf(head);
+    if (at >= 0) { // retyped the story so far: skip everything it already had
+      const old = prior.slice(at);
+      let i = 0, k = 0; // walk both texts, ignoring how whitespace differs
+      while (i < text.length && k < old.length) {
+        if (/\s/.test(text[i])) { i++; if (old[k] === ' ') k++; continue; }
+        if (text[i] !== old[k]) break;
+        i++; k++;
+      }
+      text = text.slice(i).replace(/^\s+/, '');
+      return trimRepeat(text);
+    }
+    // Restarted itself: the opening shows up again later.
+    const words = head.split(' ').slice(0, 12).join(' ');
+    const re = new RegExp(words.split(' ').map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+'), 'g');
+    const first = re.exec(text); // the opening itself
+    if (!first) return text;
+    re.lastIndex = first.index + 1;
+    const again = re.exec(text);
+    return again ? text.slice(0, again.index).trim() : text;
+  }
+
+  // The second pass after a story: a continuity editor compares the new text with the sheets and the bible and fixes slips
+  // with exact find/replace edits (applyEdits), so nothing else in the story moves.
+  const CHECKS = {
+    lore: 'world lore, places, past events, relationships, and each character\'s personality and traits (how they talk and act, what they want, what they know)',
+    looks: 'physical descriptions: hair, eyes, skin, height, build, body type, age, scars, tattoos and usual style of each character. A character\'s body stays the same from scene to scene',
+  };
+  function buildCheckMessages(state, story, part, kind) {
+    const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
+    const system = 'You are a continuity editor for a fiction series. Reply with JSON only, no markdown.';
+    const user = `Series bible:\n${describeWorld(state.world)}\n\nCharacters:\n${chars.map(describeCharacter).join('\n\n') || '(none)'}\n\n` +
+      `New text:\n\"\"\"${part}\"\"\"\n\n` +
+      `Check the new text only against the ${CHECKS[kind]}. Find every passage that contradicts the bible or the character sheets and rewrite it so it agrees, changing as little as possible and keeping the style and explicitness. ` +
+      'Do not fix anything else, and leave new facts that don\'t contradict anything alone. Return JSON:\n' +
+      '{"edits": [{"find": "exact text copied from the new text, long enough to be unique", "replace": "the corrected text"}]}\n' +
+      'Use an empty edits list if nothing contradicts them.';
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
   }
 
@@ -781,7 +829,7 @@
     const lines = buffer.split('\n');
     const rest = lines.pop();
     const tokens = [];
-    let done = false, error = null;
+    let done = false, error = null, whole = '';
     for (const line of lines) {
       const t = line.trim();
       if (!t.startsWith('data:')) continue;
@@ -790,11 +838,13 @@
       try {
         const d = JSON.parse(data);
         error = error || providerError(d);
-        const tok = d.choices && d.choices[0] && ((d.choices[0].delta && d.choices[0].delta.content) || (d.choices[0].message && d.choices[0].message.content));
-        if (tok) tokens.push(tok);
+        const c = d.choices && d.choices[0];
+        if (c && c.delta && c.delta.content) tokens.push(c.delta.content);
+        // Some providers end the stream with the whole reply again under `message`; adding it to the deltas wrote the story twice.
+        else if (c && c.message && c.message.content) whole = c.message.content;
       } catch (e) { /* keep-alive or partial junk */ }
     }
-    return { tokens, rest, done, error };
+    return { tokens, rest, done, error, whole };
   }
 
   // ---------- encryption: AES-256-GCM via WebCrypto, so browser and node both run it ----------
@@ -831,7 +881,7 @@
   const seal = async (obj, key, salt) => ({ aetherstory: 'locked-v1', alg: 'AES-256-GCM, PBKDF2-SHA256', iterations: PBKDF2_ITERATIONS, salt, ...(await encryptWith(obj, key)) });
   const unseal = decryptWith;
 
-  const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
+  const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, trimRepeat, buildCheckMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, freeFallbacks, describeWorld, currentRelationships,
     SPICE, spiceText, memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, portraitPrompt, toPanels,
     comicParts, buildPanelCheckMessages, applyPanelCheck, needsLook, buildLookMessages, applyLooks, buildPictureCheckMessages,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
