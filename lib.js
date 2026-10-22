@@ -27,6 +27,7 @@
         hordeKey: '', // optional free AI Horde key: pictures come back sooner than anonymous ones
         spice: 'adult', // how explicit stories and pictures get while mature is on: adult | kinky | nympho (SPICE)
         comfyUrl: '', // the user's own ComfyUI (e.g. http://127.0.0.1:8189): pictures drawn on their PC, AI Horde as backup
+        helperUrl: '', // the laptop helper (helper.js); empty = the https ComfyUI address + /helper
         comfyModel: '', // checkpoint file in that ComfyUI; empty = the first one it lists
         comfyNsfwModel: '', // checkpoint for explicit comic panels; empty = comfyModel
         checkPictures: true, // the story AI looks at each comic panel and redraws one that doesn't match
@@ -825,6 +826,115 @@
   }
 
   // Split an SSE buffer into complete `data:` payloads plus the unfinished tail.
+  // One call to an OpenAI-compatible AI, streamed when it can be. Runs in the app and on the laptop helper.
+  // `cutOff()` says whether a stream that ended without [DONE] was cut (the app went to the background) rather than finished.
+  async function ask(s, messages, { onToken, signal, stream = true, cutOff } = {}) {
+    if (!s.baseUrl || !s.model) throw new Error('Set an AI provider and model in Settings first.');
+    const headers = { 'Content-Type': 'application/json' };
+    if (s.apiKey) headers.Authorization = 'Bearer ' + s.apiKey;
+    const res = await fetch(s.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+      method: 'POST', headers, signal,
+      // Private mode: OpenRouter only routes to providers that don't store or train on prompts.
+      body: JSON.stringify({ model: s.model, models: freeFallbacks(s.baseUrl, s.model) || undefined, messages, temperature: Number(s.temperature) || 0.9, stream,
+        ...(s.privateOnly && s.baseUrl.includes('openrouter.ai') ? { provider: { data_collection: 'deny' } } : {}) }),
+    });
+    if (!res.ok) {
+      const msg = `AI request failed (${res.status}): ${(await res.text()).slice(0, 300)}`;
+      const err = new Error(s.privateOnly && res.status === 404 ? msg + '\nPrivate mode is on and no private provider serves this model. Pick a paid model in Advanced mode, or turn Private mode off.' : msg);
+      err.retry = res.status === 429 || res.status >= 500;
+      throw err;
+    }
+    if (!stream || !(res.headers.get('content-type') || '').includes('event-stream')) {
+      const text = replyText(await res.json());
+      if (onToken) onToken(text);
+      return text;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', full = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) { if (cutOff && cutOff()) throw new TypeError('The connection closed while the app was in the background.'); break; } // no [DONE]: cut off, not finished
+      const out = parseSSE(buf + dec.decode(value, { stream: true }));
+      buf = out.rest;
+      if (out.error) throw out.error;
+      for (const t of out.tokens) { full += t; if (onToken) onToken(t); }
+      if (out.whole && !full) { full = out.whole; if (onToken) onToken(full); } // only for providers that never streamed deltas
+      if (out.done) break;
+    }
+    return full;
+  }
+
+  // A story from prompt to world update: write, check it twice against the sheets and the bible, then update the world.
+  // Runs in the app and on the laptop helper, so both write stories the same way. `cut` = { before, premise, length, stage }:
+  // the text before this part, and 'write' or 'check' (a resume after the writing was done). `io` does the outside world:
+  // chat(messages, { onToken, sofar }), json(messages), step(i, detail), note(detail, frac), text(storyText), save(), signal.
+  // Throws only when writing fails or is cancelled; the checks and the world update are best effort. Returns the status line.
+  async function storyJob(state, story, cut, io) {
+    const { before } = cut;
+    const messages = buildStoryMessages(state, { characterIds: story.characterIds, premise: cut.premise, length: cut.length, continueStory: before ? { ...story, text: before } : null, pov: story.pov });
+    const target = LENGTHS[cut.length] || LENGTHS.medium;
+    let part = story.text.slice(before.length).replace(/^\n\n/, ''), words = 0;
+    const keep = () => { story.text = (before ? before + '\n\n' : '') + part; io.text(story.text); };
+    const quiet = (e) => { if (io.signal && io.signal.aborted) throw e; };
+    io.step(0, `Sending ${story.characterIds.length ? `${story.characterIds.length} character sheets, ` : ''}your world notes and the premise to your AI.`);
+    if (cut.stage === 'write') {
+      if (part) io.step(1, 'Picking up where the story stopped.');
+      await io.chat(messages, { sofar: part, onToken: (t) => {
+        if (!part) io.step(1, 'The AI is writing.');
+        part += t; keep();
+        const n = part.split(/\s+/).length;
+        if (n - words >= 10) { words = n; io.note(`${n} of about ${target} words written.`, Math.min(n / target, 0.95)); }
+      } });
+      part = trimRepeat(part.trim(), before);
+      keep();
+      story.updatedAt = Date.now();
+      cut.stage = 'check';
+      await io.save();
+    }
+    // Second pass: two focused checks against the sheets and the bible, fixed in place with exact edits.
+    let fixed = 0;
+    for (const [i, kind, what] of [[2, 'lore', 'world lore, personalities and traits'], [3, 'looks', 'how everyone looks']]) {
+      io.step(i, `Comparing the story with ${what}.`);
+      try {
+        const { text, applied } = applyEdits(part, (await io.json(buildCheckMessages(state, story, part, kind))).edits);
+        part = text; fixed += applied.length; keep();
+        io.note(applied.length ? `Fixed ${applied.length} ${applied.length === 1 ? 'slip' : 'slips'}.` : 'Everything matches.');
+      } catch (e) { quiet(e); /* the story stays as written */ }
+    }
+    await io.save();
+    io.step(4, 'Looking for new facts, places, relationships and character developments.');
+    const checked = fixed ? ` Fixed ${fixed} continuity ${fixed === 1 ? 'slip' : 'slips'}.` : '';
+    try {
+      const changes = applyWorldUpdate(state, story, await io.json(buildWorldUpdateMessages(state, story)));
+      return (changes.length ? 'World updated: ' + changes.join(', ') + '.' : 'Saved. Nothing new for the world this time.') + checked;
+    } catch (e) { quiet(e); return 'Story saved, but the world update failed: ' + e.message + checked; }
+  }
+
+  // What the laptop helper needs for one story: the open world without pictures, other worlds, revisions or device keys,
+  // and only the story being written in full (the rest by title and summary, which is all the prompts use).
+  const HELPER_SETTINGS = ['baseUrl', 'apiKey', 'model', 'temperature', 'style', 'mature', 'spice', 'privateOnly'];
+  const noPictures = (k, v) => (typeof v === 'string' && v.startsWith('data:') ? undefined : v);
+  function helperState(state, story) {
+    const ai = state.world.ai || {};
+    const settings = Object.fromEntries(HELPER_SETTINGS.map((k) => [k, state.settings[k]]));
+    if (ai.apiKey) settings.apiKey = ai.apiKey;
+    if (ai.model) settings.model = ai.model;
+    const stories = state.stories.map((x) => (x === story ? { ...x, panels: undefined } : { id: x.id, title: x.title, summary: x.summary, characterIds: x.characterIds, createdAt: x.createdAt, chat: x.chat }));
+    return JSON.parse(JSON.stringify({ settings, characters: state.characters, world: { ...state.world, ai: undefined }, stories }, noPictures));
+  }
+  // Puts the helper's finished story, world and characters back. Fields the helper never had (pictures, keys) stay as they are.
+  // ponytail: last write wins; a character edited on the phone while the laptop was writing gets the laptop's copy of the fields it returned.
+  function applyHelperResult(state, story, result) {
+    const { cut, ...back } = result.story;
+    Object.assign(story, back);
+    Object.assign(state.world, result.world);
+    for (const c of result.characters) {
+      const mine = state.characters.find((x) => x.id === c.id);
+      if (mine) Object.assign(mine, c); else state.characters.push(c);
+    }
+  }
+
   // A reply cut off midway (the app went to the background): send what came so far and ask for the rest.
   function carryOn(messages, sofar) {
     if (!sofar) return messages;
@@ -888,7 +998,7 @@
   const seal = async (obj, key, salt) => ({ aetherstory: 'locked-v1', alg: 'AES-256-GCM, PBKDF2-SHA256', iterations: PBKDF2_ITERATIONS, salt, ...(await encryptWith(obj, key)) });
   const unseal = decryptWith;
 
-  const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, trimRepeat, buildCheckMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, carryOn, replyText, freeFallbacks, describeWorld, currentRelationships,
+  const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, trimRepeat, buildCheckMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, carryOn, ask, storyJob, helperState, applyHelperResult, replyText, freeFallbacks, describeWorld, currentRelationships,
     SPICE, spiceText, memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, portraitPrompt, toPanels,
     comicParts, buildPanelCheckMessages, applyPanelCheck, needsLook, buildLookMessages, applyLooks, buildPictureCheckMessages,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };

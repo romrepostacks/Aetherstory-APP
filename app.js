@@ -77,46 +77,12 @@ async function chat(messages, opts = {}) {
     }
   }
 }
-async function chatOnce(messages, { onToken, signal, stream = true, use } = {}) {
+function chatOnce(messages, { use, ...opts } = {}) {
   // A world can use its own key and model, so its stories run on a separate account. `use` swaps the provider entirely (the photo AI).
   const ai = state.world.ai || {};
-  const s = { ...state.settings, ...(ai.apiKey ? { apiKey: ai.apiKey } : {}), ...(ai.model ? { model: ai.model } : {}), ...use };
-  if (!s.baseUrl || !s.model) throw new Error('Set an AI provider and model in Settings first.');
-  const headers = { 'Content-Type': 'application/json' };
-  if (s.apiKey) headers.Authorization = 'Bearer ' + s.apiKey;
-  const res = await fetch(s.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
-    method: 'POST', headers, signal,
-    // Private mode: OpenRouter only routes to providers that don't store or train on prompts.
-    body: JSON.stringify({ model: s.model, models: A.freeFallbacks(s.baseUrl, s.model) || undefined, messages, temperature: Number(s.temperature) || 0.9, stream,
-      ...(s.privateOnly && s.baseUrl.includes('openrouter.ai') ? { provider: { data_collection: 'deny' } } : {}) }),
-  });
-  if (!res.ok) {
-    const msg = `AI request failed (${res.status}): ${(await res.text()).slice(0, 300)}`;
-    const err = new Error(s.privateOnly && res.status === 404 ? msg + '\nPrivate mode is on and no private provider serves this model. Pick a paid model in Advanced mode, or turn Private mode off.' : msg);
-    err.retry = res.status === 429 || res.status >= 500;
-    throw err;
-  }
-  if (!stream || !(res.headers.get('content-type') || '').includes('event-stream')) {
-    const d = await res.json();
-    const text = A.replyText(d);
-    if (onToken) onToken(text);
-    return text;
-  }
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '', full = '';
   const away = hides;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) { if (hides !== away) throw new TypeError('The connection closed while the app was in the background.'); break; } // no [DONE]: cut off, not finished
-    const out = A.parseSSE(buf + dec.decode(value, { stream: true }));
-    buf = out.rest;
-    if (out.error) throw out.error;
-    for (const t of out.tokens) { full += t; onToken && onToken(t); }
-    if (out.whole && !full) { full = out.whole; onToken && onToken(full); } // only for providers that never streamed deltas
-    if (out.done) break;
-  }
-  return full;
+  return A.ask({ ...state.settings, ...(ai.apiKey ? { apiKey: ai.apiKey } : {}), ...(ai.model ? { model: ai.model } : {}), ...use }, messages,
+    { ...opts, cutOff: () => hides !== away });
 }
 
 async function chatJson(messages, opts) {
@@ -271,7 +237,7 @@ const dropWorldKeys = (data) => { for (const w of [data.world, ...data.otherWorl
 // ---------- backups: one tap, or written automatically to a file the user picked (PC browsers) ----------
 async function backupText() {
   const data = JSON.parse(JSON.stringify(state));
-  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; data.settings.hordeKey = ''; data.settings.comfyUrl = ''; dropWorldKeys(data);
+  data.settings.apiKey = ''; data.settings.ttsKey = ''; data.settings.photoKey = ''; data.settings.hordeKey = ''; data.settings.comfyUrl = ''; data.settings.helperUrl = ''; data.settings.helperSecret = ''; data.settings.pushSub = null; dropWorldKeys(data);
   return JSON.stringify(await A.encryptBackup(data, await deviceKey()));
 }
 const backedUp = () => { state.settings.lastBackup = Date.now(); return save(); };
@@ -342,72 +308,109 @@ function setStatus(msg) { ui.status = msg; const el = document.getElementById('s
 
 // ---------- generation ----------
 // `cut` resumes a story the app was closed in the middle of (see resumeCut): same prompt, picking up the saved text.
+// The laptop helper writes it when it can be reached, so leaving the app doesn't stop anything; otherwise this phone does.
 async function generate(continueId, cut) {
   if (ui.busy) return;
   const existing = continueId && state.stories.find((s) => s.id === continueId);
   const cast = ui.selected.length ? [...ui.selected] : state.characters.map((c) => c.id);
   const story = existing || { id: A.uid(), title: 'Untitled story', summary: '', characterIds: cast, pov: cast.includes(ui.pov) ? ui.pov : '', premise: ui.premise, text: '', createdAt: Date.now() };
-  const before = cut ? cut.before : story.text, premise = cut ? cut.premise : ui.premise, length = cut ? cut.length : ui.length;
-  const messages = A.buildStoryMessages(state, { characterIds: story.characterIds, premise, length, continueStory: before ? { ...story, text: before } : null, pov: story.pov });
-  const target = A.LENGTHS[length] || A.LENGTHS.medium;
-  const j = startJob(cut ? 'Finishing your story' : existing ? 'Continuing your story' : 'Writing your story',
+  cut = cut || { before: story.text, premise: ui.premise, length: ui.length, stage: 'write' };
+  const j = startJob(cut.helper || story.cut ? 'Finishing your story' : existing ? 'Continuing your story' : 'Writing your story',
     ['Sending your prompt', 'Writing the story', 'Checking world lore, personality and traits', 'Checking physical descriptions', 'Updating your world']);
   if (!j) return;
   if (!existing) state.stories.push(story);
-  let part = cut ? story.text.slice(before.length).replace(/^\n\n/, '') : '', words = 0;
-  story.cut = { before, premise, length, stage: cut ? cut.stage : 'write' }; // saved when the app is hidden, cleared when done
-  const keep = () => { story.text = (before ? before + '\n\n' : '') + part; const out = document.getElementById('output'); if (out) out.textContent = story.text; };
+  story.cut = cut; // saved when the app is hidden, cleared when done
   ui.busy = true; ui.currentId = story.id; ui.abort = { abort: closeJob }; ui.status = '';
   go('write');
-  j.step(0, `Sending ${story.characterIds.length ? `${story.characterIds.length} character sheets, ` : ''}your world notes and the premise to your AI.`);
-  // Cancel keeps what was written so far.
-  const stopped = async () => { delete story.cut; part = part.trim(); if (!part && !existing) state.stories = state.stories.filter((s) => s !== story); else { keep(); story.updatedAt = Date.now(); await save(); } finish(); };
-  if (story.cut.stage === 'write') {
-    try {
-      // On a resume `part` is what was saved, and chat asks the AI to carry on from it.
-      if (part) j.step(1, 'Picking up where the story stopped.');
-      await chat(messages, { signal: j.signal, sofar: part, onToken: (t) => {
-        if (!part) j.step(1, 'The AI is writing.');
-        part += t; keep();
-        const n = part.split(/\s+/).length;
-        if (n - words >= 10) { words = n; j.note(`${n} of about ${target} words written.`, Math.min(n / target, 0.95)); }
-      } });
-    } catch (e) {
-      if (!j.signal.aborted) { ui.status = e.message; j.end(e); }
-      return stopped();
-    }
-    part = A.trimRepeat(part.trim(), before);
-    keep();
-    story.updatedAt = Date.now();
-    story.cut.stage = 'check';
-    await save();
-  }
-  // Second pass: two focused checks against the sheets and the bible, fixed in place with exact edits.
-  let fixed = 0;
-  for (const [i, kind, what] of [[2, 'lore', 'world lore, personalities and traits'], [3, 'looks', 'how everyone looks']]) {
-    j.step(i, `Comparing the story with ${what}.`);
-    try {
-      const { text, applied } = A.applyEdits(part, (await chatJson(A.buildCheckMessages(state, story, part, kind), { signal: j.signal })).edits);
-      part = text; fixed += applied.length; keep();
-      j.note(applied.length ? `Fixed ${applied.length} ${applied.length === 1 ? 'slip' : 'slips'}.` : 'Everything matches.');
-    } catch (e) { if (j.signal.aborted) return stopped(); /* best effort: the story stays as written */ }
-  }
-  await save();
-  j.step(4, 'Looking for new facts, places, relationships and character developments.');
-  const checked = fixed ? ` Fixed ${fixed} continuity ${fixed === 1 ? 'slip' : 'slips'}.` : '';
+  const io = { signal: j.signal, step: j.step, note: j.note, save,
+    text: (t) => { const out = document.getElementById('output'); if (out) out.textContent = t; },
+    chat: (m, o) => chat(m, { ...o, signal: j.signal }), json: (m) => chatJson(m, { signal: j.signal }) };
   try {
-    const changes = A.applyWorldUpdate(state, story, await chatJson(A.buildWorldUpdateMessages(state, story), { signal: j.signal }));
-    await save();
-    ui.status = (changes.length ? 'World updated: ' + changes.join(', ') + '.' : 'Saved. Nothing new for the world this time.') + checked;
+    let status = cut.helper || await helperUp() ? await onHelper(story, cut, io) : null;
+    if (status === null) status = await A.storyJob(state, story, cut, io); // no helper, or it lost the job: this phone carries on from what's saved
+    ui.status = status;
   } catch (e) {
-    if (j.signal.aborted) { delete story.cut; await save(); return finish(); }
-    ui.status = 'Story saved, but the world update failed: ' + e.message + checked;
+    if (!j.signal.aborted) { ui.status = e.message; j.end(e); }
+    delete story.cut;
+    if (!existing && !story.text.trim()) state.stories = state.stories.filter((s) => s !== story); // Cancel keeps what was written so far
+    else { story.updatedAt = Date.now(); await save(); }
+    return finish();
   }
   delete story.cut; await save();
   j.end();
   await condenseMemory();
   await autoBackup().catch(() => {});
   finish();
+}
+
+// ---------- laptop helper: helper.js on the user's PC writes stories while the phone is in the background ----------
+// Reached at the ComfyUI Tailscale address + /helper unless Settings says otherwise. A random secret pairs this phone the
+// first time; the helper keeps nothing on disk but that secret and its notification key.
+const helperBase = () => {
+  const s = state.settings;
+  if (s.helperOff) return '';
+  const u = (s.helperUrl || (/^https:/.test(s.comfyUrl || '') ? comfyBase() + '/helper' : '')).trim();
+  return u.replace(/\/+$/, '');
+};
+const helperHeaders = () => {
+  const s = state.settings;
+  if (!s.helperSecret) { s.helperSecret = A.uid() + A.uid() + A.uid(); save(); }
+  return { 'Content-Type': 'application/json', Authorization: 'Bearer ' + s.helperSecret };
+};
+async function helperHello() {
+  const res = await fetch(helperBase() + '/hello', { headers: helperHeaders(), signal: AbortSignal.timeout(4000) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.ok) throw new Error(d.error || `The helper answered ${res.status}. Check the address ends in /helper.`); // ComfyUI's own pages answer here too when no helper is set up
+  return d;
+}
+const helperUp = () => (helperBase() ? helperHello().then(() => true, () => false) : false);
+// Sends the job, then mirrors the laptop's progress into the pop-up. Returns the status line, or null when the helper
+// no longer has the job (restarted) so this phone carries on.
+async function onHelper(story, cut, io) {
+  const base = helperBase(), headers = helperHeaders(), away = '\nYour laptop is writing this, so you can switch apps: you\'ll get a notification when it\'s done.';
+  if (!cut.helper) {
+    io.step(0, 'Sending the story to your laptop.' + away);
+    const res = await fetch(base + '/jobs', { method: 'POST', headers, signal: io.signal,
+      body: JSON.stringify({ state: A.helperState(state, story), storyId: story.id, cut, push: state.settings.pushSub || null }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || !d.id) throw new Error(`The laptop helper refused the story (${d.error || res.status}).`);
+    cut.helper = d.id; await save();
+  }
+  const drop = () => fetch(`${base}/jobs/${cut.helper}`, { method: 'DELETE', headers }).catch(() => {});
+  io.signal.addEventListener('abort', drop, { once: true }); // Cancel stops the laptop too
+  let at = -1;
+  for (;;) {
+    await pause(1500, io.signal);
+    const res = await fetchBack(`${base}/jobs/${cut.helper}`, { headers, signal: io.signal }).catch((e) => { if (io.signal.aborted) throw e; });
+    if (!res || res.status === 404) { delete cut.helper; return null; } // laptop gone or restarted: carry on here from the last text it sent
+    const r = await res.json();
+    if (r.text != null && r.text !== story.text) { story.text = r.text; io.text(r.text); }
+    cut.stage = r.stage;
+    if (r.step !== at) { at = r.step; io.step(r.step, r.detail + away); } else io.note(r.detail + away, r.frac);
+    if (r.error) { drop(); throw new Error(r.error); }
+    if (r.done) { A.applyHelperResult(state, story, r.result); drop(); return r.status; }
+  }
+}
+// Notifications: the helper pings Apple's or Google's push service with an empty message (no story text in it),
+// and sw.js shows a fixed "your story is ready".
+async function helperPair(msg) {
+  const s = state.settings;
+  msg.textContent = 'Connecting…';
+  try {
+    const hello = await helperHello();
+    let note = '';
+    if ('PushManager' in window && 'Notification' in window && hello.vapid) {
+      if ((await Notification.requestPermission()) === 'granted') {
+        const reg = await navigator.serviceWorker.ready;
+        const key = Uint8Array.from(atob(hello.vapid.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+        let sub = await reg.pushManager.getSubscription();
+        if (sub && s.pushVapid !== hello.vapid) { await sub.unsubscribe(); sub = null; } // the helper made a new key
+        sub = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+        s.pushSub = sub.toJSON(); s.pushVapid = hello.vapid; await save();
+      } else note = ' Notifications are off, so check back in the app (iPhone: Settings → Notifications → Aetherstory).';
+    } else if (!('PushManager' in window)) note = ' This browser can\'t get notifications. On iPhone, open the app from its Home Screen icon.';
+    msg.textContent = `✓ Connected to the helper on ${hello.name || 'your PC'}. Stories are written there now, even when you leave the app.${note}`;
+  } catch (e) { msg.textContent = (e instanceof TypeError || e.name === 'TimeoutError' ? `Couldn't reach the helper at ${helperBase()}.` : e.message) + ' See Help & guides → Laptop helper.'; }
 }
 
 // ---------- chat with a character ----------
@@ -490,7 +493,7 @@ async function fetchBack(url, opts = {}) {
 // The app was closed (or the lock reloaded it) in the middle of a story or a comic: carry on by itself once the library is open.
 function resumeCut() {
   const s = state.stories.find((x) => x.cut);
-  if (s) return generate(s.id, s.cut);
+  if (s) return generate(s.id, s.cut); // a story the laptop was writing just picks up its progress
   const c = state.stories.find((x) => x.comicCut);
   if (c) makeComic(c, c.comicCut.replan);
 }
@@ -1106,7 +1109,7 @@ const VIEWS = {
       const data = A.normalizeState(raw);
       if (!confirm(`Replace your library with this backup (${data.otherWorlds.length + 1} worlds, ${data.stories.length + data.otherWorlds.reduce((n, x) => n + x.stories.length, 0)} stories)?`)) return;
       // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
-      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel', 'hordeKey', 'comfyUrl', 'comfyModel', 'comfyNsfwModel']) data.settings[k] = s[k];
+      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly', 'ttsKey', 'photoKey', 'photoBaseUrl', 'photoModel', 'hordeKey', 'comfyUrl', 'comfyModel', 'comfyNsfwModel', 'helperUrl', 'helperOff', 'helperSecret', 'pushSub', 'pushVapid']) data.settings[k] = s[k];
       data.settings.ageOk = true;
       dropWorldKeys(data);
       state = data; ui.pendingImport = null; await save(); render();
@@ -1156,6 +1159,7 @@ const VIEWS = {
           h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection')))],
       narration: () => narrationSettings(),
       pictures: () => pictureSettings(bind),
+      helper: () => helperSettings(bind),
       photo: () => [
         h('p', { class: 'muted' }, s.photoKey ? '✓ On. "Describe from a photo" uses Google Gemini, which reads photos better than story models.'
           : 'For the best results with "Describe from a photo" on the Cast tab, add a free Google Gemini key: open aistudio.google.com/apikey, sign in, tap Create API key, and paste it here. Without it, your main AI reads the photo.'),
@@ -1208,11 +1212,13 @@ const VIEWS = {
 
 const SETTINGS = [['ai', '🤖', 'AI & writing', 'Your AI key, Spice, story instructions, Private mode'], ['narration', '🔊', 'Narration', 'Voices and reading speed'],
   ['pictures', '🖼️', 'Pictures', 'Free AI Horde, or ComfyUI on your own PC'], ['photo', '📷', 'Photo AI', 'Describe characters from a photo'],
+  ['helper', '💻', 'Laptop helper', 'Keep writing on your PC when you leave the app'],
   ['lock', '🔒', 'App lock', 'A passcode for this device'], ['library', '💾', 'Library & backups', 'Export, import, move to another device, start over'],
   ['help', '❓', 'Help & guides', 'Step-by-step setup guides and fixes for common problems']];
 
-// help.js text: `backticks` become copyable code, {ORIGIN} this app's address (what ComfyUI must let in), arrays numbered steps.
-const richText = (t) => String(t).replaceAll('{ORIGIN}', location.origin).split('`').map((part, i) => (i % 2 ? h('code', {}, part) : part));
+// help.js text: `backticks` become copyable code, {ORIGIN} this app's origin (what ComfyUI must let in), {APP} its full address, arrays numbered steps.
+const APP_URL = location.origin + location.pathname.replace(/[^/]*$/, '');
+const richText = (t) => String(t).replaceAll('{ORIGIN}', location.origin).replaceAll('{APP}', APP_URL).split('`').map((part, i) => (i % 2 ? h('code', {}, part) : part));
 const helpBody = (body) => body.map((b) => (Array.isArray(b) ? h('ol', { class: 'steps help' }, b.map((x) => h('li', {}, richText(x)))) : h('p', { class: 'help' }, richText(b))));
 
 // Spice: lib's three levels. There's no Off any more; mature stays on.
@@ -1271,28 +1277,59 @@ function pictureSettings(bind) {
     tick('devPrompts', 'Developer: show each panel\'s prompt, the model that drew it and its check under the picture')];
 }
 
-// First run, after the age gate: key, spice, pictures, lock. Every step can be skipped and changed later in Settings.
+function helperSettings(bind) {
+  const s = state.settings, msg = h('div', { class: 'status', 'aria-live': 'polite' });
+  const auto = /^https:/.test(s.comfyUrl || '') ? comfyBase() + '/helper' : 'https://your-pc.your-tailnet.ts.net/helper';
+  return [h('p', { class: 'muted' }, 'A small free program on your PC writes your stories, so you can tap Generate and switch apps. You get a notification when it\'s done. ' +
+      'It needs the PC on and Tailscale connected; when it can\'t be reached, this device writes the story instead.'),
+    h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => go('help', 'helper') }, 'Set-up guide'), h('button', { class: 'btn ghost', onclick: () => go('help', 'full') }, 'Full setup')),
+    ...field('Helper address (empty: your ComfyUI address + /helper)', bind('helperUrl', h('input', { type: 'url', autocomplete: 'off', placeholder: auto }))),
+    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => helperPair(msg) }, 'Test and turn on notifications')), msg,
+    h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.helperOff, onchange: (e) => { s.helperOff = e.target.checked; save(); }, style: 'width:auto' }), ' Don\'t use the helper: write on this device only')];
+}
+
+// First run, after the age gate: Quick start (key, spice, pictures, lock) or the Full setup, which adds Tailscale, ComfyUI
+// and the laptop helper with their guides inline. Every step can be skipped and changed later in Settings.
 function setupWizard() {
   const s = state.settings, step = ui.setupStep || 0;
   const next = () => { ui.setupStep = step + 1; render(); window.scrollTo(0, 0); };
-  const finish = async () => { s.setupDone = true; ui.setupStep = 0; await save(); go('write'); };
+  const finish = async () => { s.setupDone = true; ui.setupStep = 0; ui.setupMode = null; await save(); go('write'); };
   const bind = (key, el) => { el.value = s[key]; el.addEventListener('change', () => { s[key] = el.value.trim(); save(); }); return el; };
+  if (!ui.setupMode) {
+    const pick = (mode) => { ui.setupMode = mode; ui.setupStep = 0; render(); window.scrollTo(0, 0); };
+    return [h('h2', {}, 'Welcome!'), h('p', {}, 'How do you want to start?'),
+      menuCard('⚡', 'Quick start', 'A few quick choices, then you\'re writing. About 3 minutes, on this device only.', () => pick('quick')),
+      menuCard('🧭', 'Walk me through the full setup', 'Also sets up your PC: pictures in seconds, and stories that keep writing when you leave the app. About 45 minutes, free.', () => pick('full')),
+      h('p', { class: 'muted' }, 'You can do the full setup later too: Settings → Help & guides → Full setup.')];
+  }
+  const guide = (id) => helpBody(HELP.guides.find((g) => g.id === id).body);
+  const comfyMsg = h('div', { class: 'status', 'aria-live': 'polite' });
   const steps = [
-    () => [h('h2', {}, 'Step 1 of 4: your free AI key'),
-      s.apiKey ? h('p', {}, '✓ Your key is already saved.') : [h('p', {}, 'Stories are written by an AI using your own free key. It takes about two minutes and costs nothing.'), keySetup(next)]],
-    () => [h('h2', {}, 'Step 2 of 4: how spicy?'), h('p', { class: 'muted' }, 'This sets how explicit stories, chats and comic pictures are. You can change it any time on the Write tab.'), spiceControl()],
-    () => [h('h2', {}, 'Step 3 of 4: pictures'),
-      h('p', {}, 'Comics and portraits are drawn for free by AI Horde volunteers, which can take a minute or more per picture. For shorter waits, register free at aihorde.net/register and paste your key (optional).'),
+    ['your free AI key', () => s.apiKey ? h('p', {}, '✓ Your key is already saved.') : [h('p', {}, 'Stories are written by an AI using your own free key. It takes about two minutes and costs nothing.'), keySetup(next)]],
+    ['how spicy?', () => [h('p', { class: 'muted' }, 'This sets how explicit stories, chats and comic pictures are. You can change it any time on the Write tab.'), spiceControl()]],
+    ['pictures', () => [h('p', {}, 'Comics and portraits are drawn for free by AI Horde volunteers, which can take a minute or more per picture. For shorter waits, register free at aihorde.net/register and paste your key (optional).'),
       ...field('AI Horde API key (optional)', bind('hordeKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Horde key' }))),
-      h('p', { class: 'muted' }, 'Have a Windows PC with an NVIDIA graphics card? It can draw pictures in seconds. The guide is in Settings → Help & guides whenever you want it.')],
-    () => [h('h2', {}, 'Step 4 of 4: lock the app (optional)'),
-      lockKey ? [h('p', {}, '✓ App lock is on.'), h('div', { class: 'status', id: 'status' }, ui.status)] : lockSetup()],
-  ];
+      ui.setupMode === 'quick' && h('p', { class: 'muted' }, 'Have a Windows PC with an NVIDIA graphics card? It can draw pictures in seconds. The guide is in Settings → Help & guides whenever you want it.')]],
+    ui.setupMode === 'full' && ['install the app', () => guide('install')],
+    ui.setupMode === 'full' && ['connect your phone and PC', () => guide('tailscale')],
+    ui.setupMode === 'full' && ['ComfyUI on your PC', () => [guide('comfy'), h('p', { class: 'muted' }, 'Doing this on the phone? Do the next step first, then come back and test with the https address.'),
+      ...field('ComfyUI address', bind('comfyUrl', h('input', { type: 'url', autocomplete: 'off', placeholder: 'http://127.0.0.1:8189' }))),
+      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: async () => {
+        if (!s.comfyUrl) { comfyMsg.textContent = 'Type your ComfyUI address first.'; return; }
+        comfyMsg.textContent = 'Testing…';
+        try { const list = await comfyModels(); if (!list.includes(s.comfyModel)) { s.comfyModel = list[0] || ''; save(); } comfyMsg.textContent = `✓ Connected. Pictures will be drawn on your PC with ${s.comfyModel || 'your model'}.`; } catch (e) { comfyMsg.textContent = comfyError(e); }
+      } }, 'Test')), comfyMsg]],
+    ui.setupMode === 'full' && ['use ComfyUI from your phone', () => [guide('phone'),
+      ...field('ComfyUI address (your PC\'s https address)', bind('comfyUrl', h('input', { type: 'url', autocomplete: 'off', placeholder: 'https://your-pc.your-tailnet.ts.net' })))]],
+    ui.setupMode === 'full' && ['the laptop helper', () => [guide('helper'), ...helperSettings(bind).slice(2, -1)]], // its address, Test button and result
+    ['lock the app (optional)', () => lockKey ? [h('p', {}, '✓ App lock is on.'), h('div', { class: 'status', id: 'status' }, ui.status)] : lockSetup()],
+  ].filter(Boolean);
   const last = step === steps.length - 1;
-  return [h('p', { class: 'muted' }, 'Welcome! A few quick choices, then you\'re writing. Everything here can be changed later in Settings.'),
-    steps[step](),
+  return [h('p', { class: 'muted' }, ui.setupMode === 'full' ? 'Full setup. Do each step at your own pace; Skip moves on, and everything can be changed later in Settings.'
+      : 'Welcome! A few quick choices, then you\'re writing. Everything here can be changed later in Settings.'),
+    h('h2', {}, `Step ${step + 1} of ${steps.length}: ${steps[step][0]}`), steps[step][1](),
     h('div', { class: 'row' }, h('button', { class: 'btn', onclick: last ? finish : next }, last ? 'Start writing' : 'Next'),
-      step > 0 && h('button', { class: 'btn ghost', onclick: () => { ui.setupStep = step - 1; render(); } }, 'Back'),
+      h('button', { class: 'btn ghost', onclick: () => { if (step > 0) ui.setupStep = step - 1; else ui.setupMode = null; render(); } }, 'Back'),
       !last && h('button', { class: 'btn ghost', onclick: finish }, 'Skip setup'))];
 }
 

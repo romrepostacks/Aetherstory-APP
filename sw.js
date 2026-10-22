@@ -1,5 +1,5 @@
 // Offline app shell. Bump VERSION when shipping changes so phones pick them up.
-const VERSION = 'aetherstory-v32';
+const VERSION = 'aetherstory-v33';
 const SHELL = ['./', 'index.html', 'app.js', 'lib.js', 'help.js', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));
@@ -18,4 +18,10 @@ self.addEventListener('fetch', (e) => {
       return res;
     }).catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || caches.match('index.html')))
   );
+});
+// The laptop helper's "done" ping carries no text, so nothing about the story passes through Apple's or Google's push service.
+self.addEventListener('push', (e) => e.waitUntil(self.registration.showNotification('Aetherstory', { body: 'Your story is ready.', icon: 'icon-192.png', tag: 'story' })));
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window' }).then((all) => (all[0] ? all[0].focus() : self.clients.openWindow('./'))));
 });
