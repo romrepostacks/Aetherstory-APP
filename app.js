@@ -30,7 +30,7 @@ async function get(key) {
   }
 }
 // App lock: while it's on, every record is sealed with a key derived from the passcode. Only kept in memory, never stored.
-let lockKey = null, lockSalt = null, lockPass = null; // lockPass: the PIN, in memory only, so Face ID can be turned on without asking for it again
+let lockKey = null, lockSalt = null;
 async function put(key, value) {
   const rec = lockKey ? await A.seal(value, lockKey, lockSalt) : value;
   try { await kv(key, rec); } catch (e) { localStorage.setItem(lsName(key), JSON.stringify(rec)); }
@@ -51,56 +51,12 @@ async function setLock(passcode) {
   const dk = await deviceKey();
   lockSalt = passcode ? A.newSalt() : null;
   lockKey = passcode ? await A.deriveKey(passcode, lockSalt) : null;
-  lockPass = passcode;
   await put('deviceKey', dk);
   await save();
   // Not secret: tells the lock screen to show the keypad (older locks used a typed passcode).
   ui.lockStyle = passcode ? 'pin' : null;
   await kv('lockStyle', ui.lockStyle).catch(() => {});
-  if (!passcode) await forgetBio();
-  else if (ui.faceId) await bioStore(passcode).catch(forgetBio); // a new PIN: Face ID keeps working if it re-seals, else it's turned off
 }
-
-// ---------- Face ID (or any passkey with the PRF extension): unlocks without typing the PIN ----------
-// The PIN is stored encrypted with a secret only the passkey can produce after a face or fingerprint check, so the browser's files alone don't open it.
-const bioName = /iPhone|iPad|Macintosh/.test(navigator.userAgent) ? 'Face ID' : 'Biometric unlock';
-const canBio = () => !!(window.PublicKeyCredential && navigator.credentials && crypto.subtle);
-const b64 = (u) => btoa(String.fromCharCode(...new Uint8Array(u)));
-const unb64 = (t) => Uint8Array.from(atob(t), (ch) => ch.charCodeAt(0));
-const rand = (n) => crypto.getRandomValues(new Uint8Array(n));
-const prfKey = (out) => crypto.subtle.importKey('raw', out, 'AES-GCM', false, ['encrypt', 'decrypt']);
-async function bioSecret(id, salt) {
-  const cred = await navigator.credentials.get({ publicKey: { challenge: rand(32), allowCredentials: [{ type: 'public-key', id }], userVerification: 'required',
-    extensions: { prf: { eval: { first: salt } } } } });
-  const out = ((cred.getClientExtensionResults().prf || {}).results || {}).first;
-  if (!out) throw new Error(`This device can't unlock Aetherstory with ${bioName}.`);
-  return prfKey(out);
-}
-// Seals `pin` under the passkey's secret. Asks for Face ID unless `key` is given (creating the passkey sometimes returns the secret already).
-async function bioStore(pin, { id = unb64(ui.faceId.id), salt = unb64(ui.faceId.salt), key } = {}) {
-  key = key || await bioSecret(id, salt);
-  const iv = rand(12);
-  const rec = { id: b64(id), salt: b64(salt), iv: b64(iv), data: b64(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(pin))) };
-  await kv('faceId', rec);
-  ui.faceId = rec;
-}
-async function bioEnable() {
-  const salt = rand(32);
-  const cred = await navigator.credentials.create({ publicKey: {
-    rp: { name: 'Aetherstory' }, user: { id: rand(16), name: 'Aetherstory app lock', displayName: 'Aetherstory app lock' }, challenge: rand(32),
-    pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'preferred' },
-    extensions: { prf: { eval: { first: salt } } } } });
-  const prf = cred.getClientExtensionResults().prf || {};
-  if (!prf.enabled && !prf.results) throw new Error(`This device can't unlock Aetherstory with ${bioName}. Your PIN still works.`);
-  const id = new Uint8Array(cred.rawId);
-  await bioStore(lockPass, { id, salt, key: prf.results && prf.results.first ? await prfKey(prf.results.first) : await bioSecret(id, salt) });
-}
-async function bioOpen() {
-  const f = ui.faceId, key = await bioSecret(unb64(f.id), unb64(f.salt));
-  return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(f.iv) }, key, unb64(f.data)));
-}
-async function forgetBio() { ui.faceId = null; await kv('faceId', null).catch(() => {}); }
 
 // ---------- AI ----------
 // Free models are often busy or rate limited: retry a couple of times before giving up, unless text already streamed in.
@@ -837,7 +793,10 @@ function keySetup(onDone = () => { ui.status = 'You are all set!'; go('write'); 
 }
 // A phone-style keypad for the lock PIN: dots fill as digits go in, and it submits itself at the 6th. A keyboard works too.
 const PIN_LEN = 6;
-function pinPad(onFull, extraKey) {
+const KEY_LETTERS = { 2: 'ABC', 3: 'DEF', 4: 'GHI', 5: 'JKL', 6: 'MNO', 7: 'PQRS', 8: 'TUV', 9: 'WXYZ' };
+const icon = (svg, cls) => { const el = h('span', { class: cls, 'aria-hidden': 'true' }); el.innerHTML = svg; return el; }; // fixed strings only, never user text
+const LOCK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>';
+function pinPad(onFull) {
   let pin = '';
   const dots = h('div', { class: 'dots', role: 'status', 'aria-label': 'PIN digits entered' });
   const show = () => { dots.replaceChildren(...Array.from({ length: PIN_LEN }, (_, i) => h('span', { class: i < pin.length ? 'on' : '' }))); dots.setAttribute('aria-valuenow', pin.length); };
@@ -847,8 +806,8 @@ function pinPad(onFull, extraKey) {
     if (pin.length === PIN_LEN) { const p = pin; setTimeout(() => { pin = ''; show(); onFull(p); }, 150); } // let the last dot fill first
   };
   const back = () => { pin = pin.slice(0, -1); show(); };
-  const key = (label, fn, aria) => h('button', { class: 'key', type: 'button', 'aria-label': aria || label, onclick: fn }, label);
-  const pad = h('div', { class: 'keypad' }, '123456789'.split('').map((d) => key(d, () => press(d))), extraKey || h('span'), key('0', () => press('0')), key('⌫', back, 'Delete'));
+  const key = (d) => h('button', { class: 'key', type: 'button', 'aria-label': d, onclick: () => press(d) }, d, KEY_LETTERS[d] && h('small', { 'aria-hidden': 'true' }, KEY_LETTERS[d]));
+  const pad = h('div', { class: 'keypad' }, '123456789'.split('').map(key), h('span'), key('0'), h('button', { class: 'key plain', type: 'button', onclick: back }, 'Delete'));
   const onKey = (e) => {
     if (!pad.isConnected) return removeEventListener('keydown', onKey);
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -858,6 +817,8 @@ function pinPad(onFull, extraKey) {
   show();
   return { nodes: [dots, pad], bad: () => { dots.classList.remove('bad'); void dots.offsetWidth; dots.classList.add('bad'); if (navigator.vibrate) navigator.vibrate(120); } };
 }
+// iPhone-style: just a small link under the keypad, the full explanation only when tapped.
+const forgotLink = (forgot) => { const a = h('button', { class: 'linkbtn', type: 'button', onclick: () => a.replaceWith(forgot) }, 'Forgot PIN?'); return a; };
 function lockScreen() {
   const msg = h('div', { class: 'muted center', 'aria-live': 'polite' });
   let pad;
@@ -866,25 +827,19 @@ function lockScreen() {
     const key = await A.deriveKey(pass, ui.locked.salt);
     let data;
     try { data = await A.unseal(ui.locked, key); } catch (e) { msg.textContent = ui.lockStyle === 'pin' ? 'Wrong PIN. Try again.' : 'Wrong passcode.'; if (pad) pad.bad(); return; }
-    lockKey = key; lockSalt = ui.locked.salt; lockPass = pass; state = A.normalizeState(data); ui.locked = null; render();
+    lockKey = key; lockSalt = ui.locked.salt; state = A.normalizeState(data); ui.locked = null; render();
   };
-  const face = async (auto) => {
-    msg.textContent = '';
-    try { await unlock(await bioOpen()); } catch (e) { msg.textContent = e.name === 'NotAllowedError' ? (auto === true ? `Tap 👤 for ${bioName}, or type your PIN.` : `${bioName} was cancelled. Use your PIN.`) : e.message; }
-  };
-  const forgot = h('p', { class: 'muted center' }, 'Forgot it? Your stories can\'t be recovered without it. You can ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); eraseAll(); } }, 'erase everything'), ' and start over, then import a backup.');
+  const forgot = h('p', { class: 'muted center' }, 'Forgot your PIN? Your stories can\'t be recovered without it. You can ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); eraseAll(); } }, 'erase everything'), ' and start over, then import a backup.');
   if (ui.lockStyle !== 'pin') { // locks made before the keypad: typed passcode
     const pass = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Passcode' });
     pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(pass.value); });
     setTimeout(() => pass.focus());
-    return [h('div', { class: 'lockwrap' }, h('div', { class: 'lockicon' }, '🔒'), h('h2', {}, 'Aetherstory is locked'), pass,
+    return [h('div', { class: 'lockwrap' }, icon(LOCK_SVG, 'lockicon'), h('h2', {}, 'Aetherstory is locked'), pass,
       h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => unlock(pass.value) }, 'Unlock')), msg,
-      h('p', { class: 'muted center' }, 'Tip: after unlocking, Settings → App lock → Change to a PIN gives you a keypad and ' + bioName + '.'), forgot)];
+      h('p', { class: 'muted center' }, 'Tip: after unlocking, Settings → App lock → Change to a PIN gives you a keypad.'), forgot)];
   }
-  pad = pinPad(unlock, ui.faceId && h('button', { class: 'key bio', type: 'button', 'aria-label': 'Unlock with ' + bioName, onclick: face }, '👤'));
-  // Ask for Face ID straight away, once per opening; the keypad stays there if it's cancelled.
-  if (ui.faceId && !ui.faceTried) { ui.faceTried = true; setTimeout(() => face(true), 300); }
-  return [h('div', { class: 'lockwrap' }, h('div', { class: 'lockicon' }, '🔒'), h('h2', {}, 'Enter your PIN'), ...pad.nodes, msg, forgot)];
+  pad = pinPad(unlock);
+  return [h('div', { class: 'lockwrap' }, icon(LOCK_SVG, 'lockicon'), h('h2', {}, 'Enter Aetherstory PIN'), ...pad.nodes, msg, forgotLink(forgot))];
 }
 function ageGate() {
   return [h('h2', {}, 'Adults only (18+)'),
@@ -1168,8 +1123,7 @@ const VIEWS = {
           h('p', { class: 'muted' }, 'Any OpenAI-compatible service with a vision model works here.'),
           ...field('Base URL', bind('photoBaseUrl', h('input', {}))), ...field('Model', bind('photoModel', h('input', {}))))],
       lock: () => !lockKey || ui.changingPin ? [lockSetup(!!lockKey), ui.changingPin && h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => { ui.changingPin = false; render(); } }, 'Cancel'))]
-        : [h('p', { class: 'muted' }, `✓ On. Your stories, characters, world and keys are encrypted on this device${ui.faceId ? `, and ${bioName} opens it` : ''}.`),
-          bioControl(),
+        : [h('p', { class: 'muted' }, `✓ On. Your stories, characters, world and keys are encrypted on this device.`),
           ...field('Lock again when I leave the app', h('select', { onchange: (e) => { s.lockAfter = Number(e.target.value); save(); } },
             LOCK_AFTER.map(([m, l]) => h('option', { value: m, selected: lockAfter() === m }, l)))),
           h('div', { class: 'status', id: 'status' }, ui.status),
@@ -1290,7 +1244,7 @@ function setupWizard() {
       ...field('AI Horde API key (optional)', bind('hordeKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your Horde key' }))),
       h('p', { class: 'muted' }, 'Have a Windows PC with an NVIDIA graphics card? It can draw pictures in seconds. The guide is in Settings → Help & guides whenever you want it.')],
     () => [h('h2', {}, 'Step 4 of 4: lock the app (optional)'),
-      lockKey ? [h('p', {}, '✓ App lock is on.'), bioControl(), h('div', { class: 'status', id: 'status' }, ui.status)] : lockSetup()],
+      lockKey ? [h('p', {}, '✓ App lock is on.'), h('div', { class: 'status', id: 'status' }, ui.status)] : lockSetup()],
   ];
   const last = step === steps.length - 1;
   return [h('p', { class: 'muted' }, 'Welcome! A few quick choices, then you\'re writing. Everything here can be changed later in Settings.'),
@@ -1449,7 +1403,7 @@ function characterEditor(c) {
     appearsIn.length > 0 && [h('h2', {}, 'Appears in'), appearsIn.map((s) => h('div', { class: 'card', onclick: () => openStory(s) }, h('h3', {}, (s.chat ? '💬 ' : '') + s.title), h('p', {}, s.summary || '')))]];
 }
 
-// Choose (or change) the 6-digit PIN: type it, type it again, done. Face ID is offered right after.
+// Choose (or change) the 6-digit PIN: type it, type it again, done.
 const easyPin = (p) => /^(\d)\1+$/.test(p) || '01234567890'.includes(p) || '09876543210'.includes(p);
 function lockSetup(change) {
   let first = null;
@@ -1468,16 +1422,6 @@ function lockSetup(change) {
   return [!change && h('p', { class: 'muted' }, 'Encrypts your stories, characters, world and keys on this device. Anyone opening the app, or copying the browser\'s files, sees only scrambled data. If you forget the PIN, your stories can\'t be recovered, so keep a backup and your key file somewhere safe.'),
     title, ...pad.nodes, msg];
 }
-// Turn Face ID on or off. Needs the PIN in memory, which it always is while unlocked.
-function bioControl() {
-  if (!lockKey || !canBio() || ui.lockStyle !== 'pin') return null;
-  const msg = h('div', { class: 'status' });
-  return [h('div', { class: 'row' }, ui.faceId
-    ? h('button', { class: 'btn ghost', onclick: async () => { await forgetBio(); render(); } }, `Turn off ${bioName}`)
-    : h('button', { class: 'btn', onclick: async () => {
-      try { await bioEnable(); ui.status = `${bioName} is on. Next time, just look at your phone.`; render(); } catch (e) { msg.textContent = e.name === 'NotAllowedError' ? `${bioName} was cancelled.` : e.message; }
-    } }, `Unlock with ${bioName}`)), msg];
-}
 const LOCK_AFTER = [[0, 'Right away'], [1, 'After 1 minute'], [5, 'After 5 minutes'], [15, 'After 15 minutes'], [60, 'After 1 hour']];
 const lockAfter = () => (Number.isFinite(state.settings.lockAfter) ? state.settings.lockAfter : 5);
 
@@ -1494,7 +1438,8 @@ async function eraseAll() {
 // ---------- boot ----------
 (async () => {
   const saved = await get('state');
-  [ui.lockStyle, ui.faceId] = await Promise.all([kv('lockStyle').catch(() => null), kv('faceId').catch(() => null)]);
+  ui.lockStyle = await kv('lockStyle').catch(() => null);
+  kv('faceId', null).catch(() => {}); // Face ID unlock was removed: drop the PIN it kept sealed
   if (A.isLocked(saved)) ui.locked = saved; else state = A.normalizeState(saved);
   // Blur the screen when the app is hidden, so the app switcher preview doesn't show a story. Best effort: browsers decide when they snapshot.
   // With the lock on, coming back after the chosen time (Settings → App lock, 5 minutes unless changed) reloads, which drops the key and the library from memory.
