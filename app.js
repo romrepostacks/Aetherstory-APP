@@ -837,6 +837,10 @@ function keySetup(onDone = () => { ui.status = 'You are all set!'; go('write'); 
 }
 // A phone-style keypad for the lock PIN: dots fill as digits go in, and it submits itself at the 6th. A keyboard works too.
 const PIN_LEN = 6;
+const KEY_LETTERS = { 2: 'ABC', 3: 'DEF', 4: 'GHI', 5: 'JKL', 6: 'MNO', 7: 'PQRS', 8: 'TUV', 9: 'WXYZ' };
+const icon = (svg, cls) => { const el = h('span', { class: cls, 'aria-hidden': 'true' }); el.innerHTML = svg; return el; }; // fixed strings only, never user text
+const LOCK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>';
+const FACE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5.5A2.5 2.5 0 0 1 5.5 3H8M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8M21 16v2.5a2.5 2.5 0 0 1-2.5 2.5H16M8 21H5.5A2.5 2.5 0 0 1 3 18.5V16M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1M9 16.5c1.8 1.4 4.2 1.4 6 0"/></svg>';
 function pinPad(onFull, extraKey) {
   let pin = '';
   const dots = h('div', { class: 'dots', role: 'status', 'aria-label': 'PIN digits entered' });
@@ -847,8 +851,8 @@ function pinPad(onFull, extraKey) {
     if (pin.length === PIN_LEN) { const p = pin; setTimeout(() => { pin = ''; show(); onFull(p); }, 150); } // let the last dot fill first
   };
   const back = () => { pin = pin.slice(0, -1); show(); };
-  const key = (label, fn, aria) => h('button', { class: 'key', type: 'button', 'aria-label': aria || label, onclick: fn }, label);
-  const pad = h('div', { class: 'keypad' }, '123456789'.split('').map((d) => key(d, () => press(d))), extraKey || h('span'), key('0', () => press('0')), key('⌫', back, 'Delete'));
+  const key = (d) => h('button', { class: 'key', type: 'button', 'aria-label': d, onclick: () => press(d) }, d, KEY_LETTERS[d] && h('small', { 'aria-hidden': 'true' }, KEY_LETTERS[d]));
+  const pad = h('div', { class: 'keypad' }, '123456789'.split('').map(key), extraKey || h('span'), key('0'), h('button', { class: 'key plain', type: 'button', onclick: back }, 'Delete'));
   const onKey = (e) => {
     if (!pad.isConnected) return removeEventListener('keydown', onKey);
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -858,6 +862,8 @@ function pinPad(onFull, extraKey) {
   show();
   return { nodes: [dots, pad], bad: () => { dots.classList.remove('bad'); void dots.offsetWidth; dots.classList.add('bad'); if (navigator.vibrate) navigator.vibrate(120); } };
 }
+// iPhone-style: just a small link under the keypad, the full explanation only when tapped.
+const forgotLink = (forgot) => { const a = h('button', { class: 'linkbtn', type: 'button', onclick: () => a.replaceWith(forgot) }, 'Forgot PIN?'); return a; };
 function lockScreen() {
   const msg = h('div', { class: 'muted center', 'aria-live': 'polite' });
   let pad;
@@ -870,21 +876,21 @@ function lockScreen() {
   };
   const face = async (auto) => {
     msg.textContent = '';
-    try { await unlock(await bioOpen()); } catch (e) { msg.textContent = e.name === 'NotAllowedError' ? (auto === true ? `Tap 👤 for ${bioName}, or type your PIN.` : `${bioName} was cancelled. Use your PIN.`) : e.message; }
+    try { await unlock(await bioOpen()); } catch (e) { msg.textContent = e.name === 'NotAllowedError' ? (auto === true ? `Tap ${bioName} below the 7, or type your PIN.` : `${bioName} was cancelled. Use your PIN.`) : e.message; }
   };
-  const forgot = h('p', { class: 'muted center' }, 'Forgot it? Your stories can\'t be recovered without it. You can ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); eraseAll(); } }, 'erase everything'), ' and start over, then import a backup.');
+  const forgot = h('p', { class: 'muted center' }, 'Forgot your PIN? Your stories can\'t be recovered without it. You can ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); eraseAll(); } }, 'erase everything'), ' and start over, then import a backup.');
   if (ui.lockStyle !== 'pin') { // locks made before the keypad: typed passcode
     const pass = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Passcode' });
     pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(pass.value); });
     setTimeout(() => pass.focus());
-    return [h('div', { class: 'lockwrap' }, h('div', { class: 'lockicon' }, '🔒'), h('h2', {}, 'Aetherstory is locked'), pass,
+    return [h('div', { class: 'lockwrap' }, icon(LOCK_SVG, 'lockicon'), h('h2', {}, 'Aetherstory is locked'), pass,
       h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => unlock(pass.value) }, 'Unlock')), msg,
       h('p', { class: 'muted center' }, 'Tip: after unlocking, Settings → App lock → Change to a PIN gives you a keypad and ' + bioName + '.'), forgot)];
   }
-  pad = pinPad(unlock, ui.faceId && h('button', { class: 'key bio', type: 'button', 'aria-label': 'Unlock with ' + bioName, onclick: face }, '👤'));
+  pad = pinPad(unlock, ui.faceId && h('button', { class: 'key plain', type: 'button', 'aria-label': 'Unlock with ' + bioName, onclick: face }, icon(FACE_SVG, 'faceicon')));
   // Ask for Face ID straight away, once per opening; the keypad stays there if it's cancelled.
   if (ui.faceId && !ui.faceTried) { ui.faceTried = true; setTimeout(() => face(true), 300); }
-  return [h('div', { class: 'lockwrap' }, h('div', { class: 'lockicon' }, '🔒'), h('h2', {}, 'Enter your PIN'), ...pad.nodes, msg, forgot)];
+  return [h('div', { class: 'lockwrap' }, icon(LOCK_SVG, 'lockicon'), h('h2', {}, 'Enter Aetherstory PIN'), ...pad.nodes, msg, forgotLink(forgot))];
 }
 function ageGate() {
   return [h('h2', {}, 'Adults only (18+)'),
