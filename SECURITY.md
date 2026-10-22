@@ -20,6 +20,7 @@ This file is the living record of how the app protects its users. **Every change
 | Photos for "Describe from a photo" | Nowhere. Shrunk to a 768px JPEG in memory, sent once, then dropped | Redrawing on a canvas strips location and camera data before sending. |
 | Premium narration audio (Venice) | IndexedDB, one record per spoken passage | Plain audio of story text, so only written while App lock is off. Erase everything deletes it. |
 | Comic panels (pictures, captions, dialogue) | On the story in the library record, so sealed by App lock and included in backups | Pictures are re-encoded to JPEG on a canvas before saving. |
+| Unfinished story or comic marker (`story.cut`, `story.comicCut`) | On the story in the library record, saved whenever the app goes to the background mid-job, so sealed by App lock | Only the prompt settings and stage needed to finish the job on next open. Removed when the job ends or is cancelled. A resumed story re-sends its text so far to the same AI provider, nothing new leaves the device. |
 | Long-term memory archive (`world.archive`) | In the library record, so sealed by App lock and included in backups | The original world notes and developments that were condensed. Never sent to the AI. |
 
 There is no server, account system, analytics, telemetry, crash reporting or third-party script. The app is static files on GitHub Pages.

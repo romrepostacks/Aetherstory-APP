@@ -60,11 +60,19 @@ async function setLock(passcode) {
 
 // ---------- AI ----------
 // Free models are often busy or rate limited: retry a couple of times before giving up, unless text already streamed in.
+// Leaving the app (an iPhone pauses it) cuts the connection: once the app is back, ask again, and if text already came in,
+// have the AI carry on from where it stopped. `sofar` starts there directly (a story cut off when the app was closed).
 async function chat(messages, opts = {}) {
-  for (let attempt = 0; ; attempt++) {
-    let got = false;
-    try { return await chatOnce(messages, { ...opts, onToken: opts.onToken && ((t) => { got = true; opts.onToken(t); }) }); } catch (e) {
-      if (!e.retry || got || attempt >= 2 || (opts.signal && opts.signal.aborted)) throw e;
+  let sofar = opts.sofar || '';
+  for (let attempt = 0, back = 0; ; attempt++) {
+    const away = hides;
+    let got = '';
+    try {
+      return sofar + await chatOnce(A.carryOn(messages, sofar), { ...opts, onToken: (t) => { got += t; if (opts.onToken) opts.onToken(t); } });
+    } catch (e) {
+      if (opts.signal && opts.signal.aborted) throw e;
+      if (isNetError(e) && (hides !== away || document.hidden) && back++ < 3) { sofar += got; await shown(); attempt--; continue; }
+      if (!e.retry || got || attempt >= 2) throw e;
       await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
     }
   }
@@ -97,9 +105,10 @@ async function chatOnce(messages, { onToken, signal, stream = true, use } = {}) 
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = '', full = '';
+  const away = hides;
   for (;;) {
     const { value, done } = await reader.read();
-    if (done) break;
+    if (done) { if (hides !== away) throw new TypeError('The connection closed while the app was in the background.'); break; } // no [DONE]: cut off, not finished
     const out = A.parseSSE(buf + dec.decode(value, { stream: true }));
     buf = out.rest;
     if (out.error) throw out.error;
@@ -332,40 +341,47 @@ function render() {
 function setStatus(msg) { ui.status = msg; const el = document.getElementById('status'); if (el) el.textContent = msg; }
 
 // ---------- generation ----------
-async function generate(continueId) {
+// `cut` resumes a story the app was closed in the middle of (see resumeCut): same prompt, picking up the saved text.
+async function generate(continueId, cut) {
   if (ui.busy) return;
   const existing = continueId && state.stories.find((s) => s.id === continueId);
   const cast = ui.selected.length ? [...ui.selected] : state.characters.map((c) => c.id);
   const story = existing || { id: A.uid(), title: 'Untitled story', summary: '', characterIds: cast, pov: cast.includes(ui.pov) ? ui.pov : '', premise: ui.premise, text: '', createdAt: Date.now() };
-  const messages = A.buildStoryMessages(state, { characterIds: story.characterIds, premise: ui.premise, length: ui.length, continueStory: existing, pov: story.pov });
-  const target = A.LENGTHS[ui.length] || A.LENGTHS.medium;
-  const j = startJob(existing ? 'Continuing your story' : 'Writing your story',
+  const before = cut ? cut.before : story.text, premise = cut ? cut.premise : ui.premise, length = cut ? cut.length : ui.length;
+  const messages = A.buildStoryMessages(state, { characterIds: story.characterIds, premise, length, continueStory: before ? { ...story, text: before } : null, pov: story.pov });
+  const target = A.LENGTHS[length] || A.LENGTHS.medium;
+  const j = startJob(cut ? 'Finishing your story' : existing ? 'Continuing your story' : 'Writing your story',
     ['Sending your prompt', 'Writing the story', 'Checking world lore, personality and traits', 'Checking physical descriptions', 'Updating your world']);
   if (!j) return;
   if (!existing) state.stories.push(story);
-  const before = story.text;
-  let part = '', words = 0;
+  let part = cut ? story.text.slice(before.length).replace(/^\n\n/, '') : '', words = 0;
+  story.cut = { before, premise, length, stage: cut ? cut.stage : 'write' }; // saved when the app is hidden, cleared when done
   const keep = () => { story.text = (before ? before + '\n\n' : '') + part; const out = document.getElementById('output'); if (out) out.textContent = story.text; };
   ui.busy = true; ui.currentId = story.id; ui.abort = { abort: closeJob }; ui.status = '';
   go('write');
   j.step(0, `Sending ${story.characterIds.length ? `${story.characterIds.length} character sheets, ` : ''}your world notes and the premise to your AI.`);
   // Cancel keeps what was written so far.
-  const stopped = async () => { part = part.trim(); if (!part && !existing) state.stories = state.stories.filter((s) => s !== story); else { keep(); story.updatedAt = Date.now(); await save(); } finish(); };
-  try {
-    await chat(messages, { signal: j.signal, onToken: (t) => {
-      if (!part) j.step(1, 'The AI is writing.');
-      part += t; keep();
-      const n = part.split(/\s+/).length;
-      if (n - words >= 10) { words = n; j.note(`${n} of about ${target} words written.`, Math.min(n / target, 0.95)); }
-    } });
-  } catch (e) {
-    if (!j.signal.aborted) { ui.status = e.message; j.end(e); }
-    return stopped();
+  const stopped = async () => { delete story.cut; part = part.trim(); if (!part && !existing) state.stories = state.stories.filter((s) => s !== story); else { keep(); story.updatedAt = Date.now(); await save(); } finish(); };
+  if (story.cut.stage === 'write') {
+    try {
+      // On a resume `part` is what was saved, and chat asks the AI to carry on from it.
+      if (part) j.step(1, 'Picking up where the story stopped.');
+      await chat(messages, { signal: j.signal, sofar: part, onToken: (t) => {
+        if (!part) j.step(1, 'The AI is writing.');
+        part += t; keep();
+        const n = part.split(/\s+/).length;
+        if (n - words >= 10) { words = n; j.note(`${n} of about ${target} words written.`, Math.min(n / target, 0.95)); }
+      } });
+    } catch (e) {
+      if (!j.signal.aborted) { ui.status = e.message; j.end(e); }
+      return stopped();
+    }
+    part = A.trimRepeat(part.trim(), before);
+    keep();
+    story.updatedAt = Date.now();
+    story.cut.stage = 'check';
+    await save();
   }
-  part = A.trimRepeat(part.trim(), before);
-  keep();
-  story.updatedAt = Date.now();
-  await save();
   // Second pass: two focused checks against the sheets and the bible, fixed in place with exact edits.
   let fixed = 0;
   for (const [i, kind, what] of [[2, 'lore', 'world lore, personalities and traits'], [3, 'looks', 'how everyone looks']]) {
@@ -384,9 +400,10 @@ async function generate(continueId) {
     await save();
     ui.status = (changes.length ? 'World updated: ' + changes.join(', ') + '.' : 'Saved. Nothing new for the world this time.') + checked;
   } catch (e) {
-    if (j.signal.aborted) return finish();
+    if (j.signal.aborted) { delete story.cut; await save(); return finish(); }
     ui.status = 'Story saved, but the world update failed: ' + e.message + checked;
   }
+  delete story.cut; await save();
   j.end();
   await condenseMemory();
   await autoBackup().catch(() => {});
@@ -454,6 +471,29 @@ async function condenseMemory() {
 // ---------- slow jobs: one pop-up showing each step, what is happening right now, and a Cancel that really stops the request ----------
 // One job at a time. Its signal goes to every fetch, so Cancel aborts the AI call or picture mid-way. A failure stays on screen until closed.
 let job = null, jobTimer = null;
+// iPhone pauses a home-screen app's code while it's in the background, which drops its connections. `hides` counts trips
+// to the background so a dropped connection can tell it was that, and `shown` waits until the app is open again.
+let hides = 0;
+const shown = () => (document.hidden ? new Promise((res) => document.addEventListener('visibilitychange', function back() {
+  if (!document.hidden) { document.removeEventListener('visibilitychange', back); setTimeout(res, 1500); } // give the network a moment to wake
+})) : Promise.resolve());
+const isNetError = (e) => e instanceof TypeError || (e && e.name === 'NetworkError');
+// For checking on a picture: a dropped connection waits for the app to be back and asks again, since the PC or Horde keeps drawing meanwhile.
+async function fetchBack(url, opts = {}) {
+  for (let tries = 0; ; tries++) {
+    try { return await fetch(url, opts); } catch (e) {
+      if ((opts.signal && opts.signal.aborted) || !isNetError(e) || tries >= 3) throw e;
+      await shown(); await pause(2000, opts.signal);
+    }
+  }
+}
+// The app was closed (or the lock reloaded it) in the middle of a story or a comic: carry on by itself once the library is open.
+function resumeCut() {
+  const s = state.stories.find((x) => x.cut);
+  if (s) return generate(s.id, s.cut);
+  const c = state.stories.find((x) => x.comicCut);
+  if (c) makeComic(c, c.comicCut.replan);
+}
 function startJob(title, steps) {
   if (job) { job.hidden = false; drawJob(); return null; } // already busy: show what's running instead
   const ctl = new AbortController();
@@ -565,9 +605,9 @@ async function drawComfy(prompt, onWait, { width, height, nsfw, signal, model, s
   // ponytail: Cancel stops waiting but lets ComfyUI finish the one picture it's on (seconds); POST /interrupt if that ever matters.
   for (;;) {
     await pause(1500, signal);
-    const run = (await (await fetch(`${comfyBase()}/history/${job.prompt_id}`, { signal })).json())[job.prompt_id];
+    const run = (await (await fetchBack(`${comfyBase()}/history/${job.prompt_id}`, { signal })).json())[job.prompt_id];
     const img = run && Object.values(run.outputs || {}).flatMap((o) => o.images || [])[0];
-    if (img) return shrinkImage(await (await fetch(`${comfyBase()}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`, { signal })).blob());
+    if (img) return shrinkImage(await (await fetchBack(`${comfyBase()}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`, { signal })).blob());
     if (run && run.status && run.status.status_str === 'error') throw new Error('ComfyUI hit an error drawing this picture; its window shows why.');
     // The PC's ComfyUI may be busy with other jobs first (it runs one queue), so allow a long wait.
     if (Date.now() - started > 30 * 60e3) throw new Error('ComfyUI took more than 30 minutes for one picture. Is something else filling its queue?');
@@ -588,15 +628,15 @@ async function drawHorde(prompt, onWait, { width, height, nsfw, signal, seed }) 
   try {
     for (;;) {
       await pause(6000, signal);
-      const c = await (await fetch(`${HORDE}/generate/check/${job.id}`, { headers, signal })).json().catch(() => ({}));
+      const c = await (await fetchBack(`${HORDE}/generate/check/${job.id}`, { headers, signal })).json().catch(() => ({}));
       if (c.done) break;
       if (c.faulted || c.is_possible === false || Date.now() - started > 15 * 60e3) { drop(); throw new Error('No artist was free for this picture right now.'); }
       if (onWait) onWait(c);
     }
   } catch (e) { if (signal && signal.aborted) drop(); throw e; }
-  const g = ((await (await fetch(`${HORDE}/generate/status/${job.id}`, { headers, signal })).json()).generations || [])[0];
+  const g = ((await (await fetchBack(`${HORDE}/generate/status/${job.id}`, { headers, signal })).json()).generations || [])[0];
   if (!g || !g.img || g.censored) throw new Error(g && g.censored ? 'The artist\'s filter blocked this picture.' : 'No picture came back.');
-  const blob = g.img.startsWith('http') ? await (await fetch(g.img)).blob() : new Blob([Uint8Array.from(atob(g.img), (ch) => ch.charCodeAt(0))], { type: 'image/webp' });
+  const blob = g.img.startsWith('http') ? await (await fetchBack(g.img)).blob() : new Blob([Uint8Array.from(atob(g.img), (ch) => ch.charCodeAt(0))], { type: 'image/webp' });
   return shrinkImage(blob);
 }
 
@@ -614,6 +654,7 @@ async function makeComic(story, replan) {
   const here = () => ui.view === 'stories' && ui.param === story.id;
   const signal = j.signal, quiet = (e) => { if (signal.aborted) throw e; }; // an AI check that fails is skipped, a Cancel isn't
   ui.drawing = story.id; ui.comic = true; ui.status = ''; render();
+  story.comicCut = { replan: plan }; // saved when the app is hidden, cleared when done
   try {
     const cast = state.characters.filter((c) => (story.characterIds || []).includes(c.id)).filter(A.needsLook);
     j.step(0, 'Your story AI writes fixed body tags (build, size, hair, face) for each character, so they look the same in every panel.');
@@ -630,7 +671,7 @@ async function makeComic(story, replan) {
         panels.push(...mine);
       }
       if (!panels.length) throw new Error('No panels came back.');
-      story.panels = panels;
+      story.panels = panels; story.comicCut.replan = false;
       await save(); if (here()) render();
     }
     const step = steps.length - 1, todo = story.panels.filter((p) => !p.img), total = todo.length;
@@ -668,6 +709,7 @@ async function makeComic(story, replan) {
     ui.status = j.signal.aborted ? 'Comic stopped. Panels already drawn are kept: tap "Draw missing panels" to carry on.' : e.message + ' Tap "Draw missing panels" to try again.';
     j.end(e);
   }
+  delete story.comicCut; await save();
   ui.drawing = null;
   if (here()) render();
   setStatus(ui.status);
@@ -827,7 +869,7 @@ function lockScreen() {
     const key = await A.deriveKey(pass, ui.locked.salt);
     let data;
     try { data = await A.unseal(ui.locked, key); } catch (e) { msg.textContent = ui.lockStyle === 'pin' ? 'Wrong PIN. Try again.' : 'Wrong passcode.'; if (pad) pad.bad(); return; }
-    lockKey = key; lockSalt = ui.locked.salt; state = A.normalizeState(data); ui.locked = null; render();
+    lockKey = key; lockSalt = ui.locked.salt; state = A.normalizeState(data); ui.locked = null; render(); resumeCut();
   };
   const forgot = h('p', { class: 'muted center' }, 'Forgot your PIN? Your stories can\'t be recovered without it. You can ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); eraseAll(); } }, 'erase everything'), ' and start over, then import a backup.');
   if (ui.lockStyle !== 'pin') { // locks made before the keypad: typed passcode
@@ -1446,7 +1488,8 @@ async function eraseAll() {
   let hiddenAt = 0;
   document.addEventListener('visibilitychange', () => {
     document.body.classList.toggle('hide', document.hidden);
-    if (document.hidden) hiddenAt = Date.now();
+    // Save what's running, so if iPhone closes the app while it's away, resumeCut picks it up next time.
+    if (document.hidden) { hiddenAt = Date.now(); hides++; if (job || ui.busy) save(); }
     else if (lockKey && Date.now() - hiddenAt >= lockAfter() * 60e3) location.reload();
   });
   // Anything that slips past a try/catch still shows up instead of failing silently.
@@ -1455,6 +1498,7 @@ async function eraseAll() {
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if (canAutoBackup) ui.backupName = ((await backupFile()) || {}).name || '';
   render();
+  if (!ui.locked) resumeCut();
   if (canSpeak) speechSynthesis.addEventListener('voiceschanged', () => { if (ui.view === 'settings') render(); });
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

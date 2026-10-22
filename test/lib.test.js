@@ -462,3 +462,11 @@ test('Spice has no Off: old Off libraries open at a level', () => {
   assert.equal(A.normalizeState({ settings: { mature: false } }).settings.mature, true);
   assert.match(A.SPICE.kinky.label, /experimental/);
 });
+
+test('carryOn asks for the rest of a cut-off reply', () => {
+  const m = [{ role: 'user', content: 'Write.' }];
+  assert.equal(A.carryOn(m, ''), m);
+  const out = A.carryOn(m, 'Mira ran to the');
+  assert.deepEqual(out.slice(0, 2), [m[0], { role: 'assistant', content: 'Mira ran to the' }]);
+  assert.match(out[2].content, /Continue exactly where/);
+});
