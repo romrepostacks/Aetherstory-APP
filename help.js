@@ -93,8 +93,6 @@
     { q: 'Comic pictures aren\'t checked, or the pop-up says your story AI can\'t look at pictures', a: ['The picture check needs a story AI that can see images, like the default Nemotron VL. With another model the comic is still drawn, just not checked. You can turn the check off in Settings → Pictures.'] },
     { q: '"ComfyUI took more than 30 minutes for one picture"', a: ['Your PC\'s ComfyUI works through one queue, so other jobs on it (like a sprite batch) go first. Let them finish, then tap Draw missing panels.'] },
     { q: '"This model may not read photos"', a: ['"Describe from a photo" needs a model that can see pictures. Add a free Gemini key under Settings → Photo AI.'] },
-    { q: 'Face ID doesn\'t show up for App lock, or says this device can\'t use it', a: ['Face ID unlock needs iOS 18 or newer (or a recent Chrome or Edge with Windows Hello on a PC) and a lock that uses a PIN. If Settings → App lock shows "Change to a PIN", tap it first. If it still says this device can\'t use it, update your phone, or keep using the PIN: it works the same.'] },
-    { q: 'I changed my PIN and Face ID stopped working', a: ['Changing the PIN asks for Face ID once to re-save it. If that was cancelled, Face ID is turned off: open Settings → App lock and tap Unlock with Face ID again.'] },
   ];
 
   root.HELP = { guides, problems };
