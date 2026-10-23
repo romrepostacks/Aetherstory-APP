@@ -462,3 +462,40 @@ test('Spice has no Off: old Off libraries open at a level', () => {
   assert.equal(A.normalizeState({ settings: { mature: false } }).settings.mature, true);
   assert.match(A.SPICE.kinky.label, /experimental/);
 });
+
+test('carryOn asks for the rest of a cut-off reply', () => {
+  const m = [{ role: 'user', content: 'Write.' }];
+  assert.equal(A.carryOn(m, ''), m);
+  const out = A.carryOn(m, 'Mira ran to the');
+  assert.deepEqual(out.slice(0, 2), [m[0], { role: 'assistant', content: 'Mira ran to the' }]);
+  assert.match(out[2].content, /Continue exactly where/);
+});
+
+test('storyJob writes, checks and updates the world through io, and helperState leaves pictures and keys behind', async () => {
+  const s = seeded();
+  s.characters[0].portrait = 'data:image/jpeg;base64,xx';
+  s.world.ai = { apiKey: 'world-key', model: 'm' };
+  const story = { id: 'n', title: 'Untitled story', summary: '', characterIds: ['a'], text: '', createdAt: 3 };
+  s.stories.push(story);
+  const slim = A.helperState(s, story);
+  assert.equal(slim.characters[0].portrait, undefined);
+  assert.equal(slim.settings.apiKey, 'world-key');
+  assert.equal(slim.world.ai, undefined);
+  assert.equal(slim.stories.find((x) => x.id === 's1').text, undefined);
+  const steps = [];
+  const io = { step: (i) => steps.push(i), note: () => {}, text: () => {}, save: async () => {},
+    chat: async (m, { onToken }) => { onToken('Mira sailed into the storm.'); return ''; },
+    json: async (m) => (/continuity/.test(m[0].content) ? { edits: [] } : { title: 'Storm', summary: 'Mira sails.', lore: ['Storms bite.'] }) };
+  const cut = { before: '', premise: 'storm', length: 'short', stage: 'write' };
+  const st = slim.stories.find((x) => x.id === 'n');
+  const status = await A.storyJob(slim, st, cut, io);
+  assert.equal(st.text, 'Mira sailed into the storm.');
+  assert.equal(cut.stage, 'check');
+  assert.deepEqual(steps, [0, 1, 2, 3, 4]);
+  assert.match(status, /World updated|Saved/);
+  A.applyHelperResult(s, story, { story: { ...st, cut }, world: slim.world, characters: slim.characters });
+  assert.equal(story.text, 'Mira sailed into the storm.');
+  assert.equal(story.cut, undefined);
+  assert.equal(s.characters[0].portrait, 'data:image/jpeg;base64,xx'); // pictures the helper never saw stay
+  assert.equal(s.world.ai.apiKey, 'world-key');
+});

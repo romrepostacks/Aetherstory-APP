@@ -1,6 +1,6 @@
 // Help & guides shown in the app (Settings → Help & guides). Plain data: app.js draws it.
 // A string is a paragraph, an array of strings is numbered steps, `backticks` mark something to type or copy,
-// and {ORIGIN} becomes this app's own web address. Add a problem here whenever a new error gets fixed.
+// {ORIGIN} becomes this app's own web origin (what ComfyUI lets in) and {APP} its full address (where helper.js lives). Add a problem here whenever a new error gets fixed.
 (function (root) {
   const guides = [
     { id: 'key', title: 'Get your free AI key', body: [
@@ -20,6 +20,18 @@
         'Send both files to the new device (email to yourself, a cloud drive, or a cable).',
         'On the new device: Settings → Library & backups → Import backup and pick the backup file. When it asks, pick the key file (aetherstory-key.txt).',
         'Paste your AI key on the new device too (Settings → AI & writing). Keys never travel in backups.'] ] },
+    { id: 'full', title: 'Full setup: stories and pictures on your PC, from anywhere', body: [
+      'The full setup lets your own PC do the heavy work: it draws pictures in seconds, and it keeps writing a story after you switch apps on your phone. Everything is free. It takes about 45 minutes once, on a Windows PC (an NVIDIA graphics card with 6 GB or more is needed for pictures; the helper alone runs on any PC).',
+      'Do these guides in order. Each one is under Settings → Help & guides:',
+      ['"Get your free AI key"', '"Install the app on your phone or PC"', '"Connect your phone and PC with Tailscale"', '"Draw pictures on your PC with ComfyUI"',
+        '"Use your PC\'s ComfyUI from your phone"', '"Laptop helper: keep writing when you leave the app"'],
+      'Afterwards the PC has to be on and awake while you use the app. When it isn\'t, everything still works on the phone alone: AI Horde draws the pictures, and stories pause while you\'re out of the app.'] },
+    { id: 'tailscale', title: 'Connect your phone and PC with Tailscale', body: [
+      'Tailscale is a free private network between your own devices. It lets the phone reach your PC from anywhere without opening anything to the internet, and everything on it is end-to-end encrypted.',
+      ['On the PC: open tailscale.com/download, install Tailscale and sign in (a Google account works).',
+        'On the iPhone: install Tailscale from the App Store, sign in with the same account, and turn it on. Both devices should show Connected.',
+        'Once, on any device: open login.tailscale.com/admin/dns and turn on MagicDNS and HTTPS Certificates. This gives your PC a private https address.'],
+      'Keep Tailscale on while you use pictures or the helper. iPhone runs one VPN at a time, so another VPN app turns Tailscale off.'] },
     { id: 'spice', title: 'Spice: how explicit stories get', body: [
       'The Spice slider (on the Write tab and in Settings → AI & writing) sets how sexual stories, character chats and comic pictures are.',
       ['Adult: explicit when the story calls for it. This is how stories have always been written.',
@@ -52,12 +64,25 @@
       'Short on disk space? The model files are the big part. You can delete the one you don\'t need in either copy\'s models\\checkpoints folder.'] },
     { id: 'phone', title: 'Use your PC\'s ComfyUI from your phone', body: [
       'Your phone can use the PC\'s ComfyUI from anywhere through Tailscale, a free private network between your own devices. Nothing is opened to the internet.',
-      ['Install Tailscale (tailscale.com/download) on the PC and on the phone, and sign in to the same account on both. Both should show Connected.',
-        'Turn on secure addresses once: open login.tailscale.com/admin/dns on any device, and turn on MagicDNS and HTTPS Certificates.',
+      ['Set up Tailscale on the PC and the phone first (guide "Connect your phone and PC with Tailscale").',
         'On the PC, start ComfyUI with start-aetherstory.bat, then open Command Prompt and type `tailscale serve --bg 8189`. It shows an address like https://your-pc.your-tailnet.ts.net. It keeps working after you close the window and after restarts.',
         'On the phone, make sure Tailscale is connected, then open Aetherstory → Settings → Pictures, paste that https address into ComfyUI address, and tap Test.'],
       'The PC has to be on, awake and running ComfyUI while you draw. In Windows power settings, set sleep to Never while plugged in if pictures stop when the screen turns off. When the PC can\'t be reached, AI Horde draws instead.',
       'The https address works on the PC too, so you can use the same one everywhere. To turn the phone access off: `tailscale serve reset`.'] },
+    { id: 'helper', title: 'Laptop helper: keep writing when you leave the app', body: [
+      'iPhone pauses an app as soon as you switch away from it, so a story stops while you\'re gone. The helper is a small free program on your PC that writes the story there instead, all the way through the checks and the world update, and sends a notification when it\'s done. When the PC can\'t be reached, the phone writes the story as before.',
+      'You need Tailscale on the PC and the phone first (guide "Connect your phone and PC with Tailscale").',
+      ['Install Node.js on the PC: open Command Prompt and type `winget install OpenJS.NodeJS.LTS` (or download the LTS installer from nodejs.org). Close Command Prompt when it\'s done.',
+        'Make a folder for the helper, for example `C:\\AI\\Aetherstory-helper`. Open it, click the address bar, type `cmd` and press Enter. In the window that opens, type:\n`curl -o helper.js {APP}helper.js`',
+        'In the same folder, make a text file called `start-helper.bat` (turn on File name extensions in Explorer\'s View menu so it doesn\'t end in .txt) containing this one line:\n`node helper.js {APP}`',
+        'Double-click start-helper.bat. A window opens saying "Aetherstory helper ready on port 8190". Leave it open.',
+        'Let your phone reach it: in Command Prompt type `tailscale serve --bg --set-path /helper 8190`. It keeps working after you close the window and after restarts.',
+        'On the phone, within 10 minutes of starting the helper: open Settings → Laptop helper, tap "Test and turn on notifications", and tap Allow. If your ComfyUI address is your PC\'s https Tailscale address, the helper address fills itself in; otherwise type that address followed by `/helper`.',
+        'Optional, so it starts with Windows: press Win+R, type `shell:startup`, press Enter, and put a shortcut to start-helper.bat in the folder that opens.'],
+      'Try it: tap Generate, wait until the pop-up says your laptop is writing it, then switch apps. The notification comes when the story is ready.',
+      'Each extra device (another phone, or the PC\'s own browser) pairs the same way: close the helper window, start it again, then tap Test on that device within 10 minutes.',
+      'Privacy: stories travel only from your phone to your own PC, over Tailscale\'s encrypted link. The PC keeps no stories: each one is held in memory until your phone collects it. Your AI key is used for that story and never written to the PC\'s disk. Notifications carry no story text. The only file the helper writes is helper-keys.json (pairing codes and its notification key).',
+      'Updates: the helper loads the story steps from the app each time, so app updates reach it by themselves. Download helper.js again (step 2) only if the app\'s news says it changed.'] },
     { id: 'private', title: 'Private mode and App lock', body: [
       'Private mode (Settings → AI & writing) only uses AI providers that don\'t keep or train on your stories. Free models may stop working with it on. Pictures then only come from your own PC\'s ComfyUI, never from AI Horde.',
       'App lock (Settings → App lock) encrypts everything on this device with a passcode and locks after 5 minutes in the background. There is no way to recover a forgotten passcode, so keep a backup and your key file.'] },
@@ -92,6 +117,15 @@
     { q: 'Everyday comic panels come out explicit', a: ['Fixed: only panels the plan marks as nudity or sex get the Spice tags; the rest are drawn clothed. Tap Redo comic on older comics.'] },
     { q: 'Comic pictures aren\'t checked, or the pop-up says your story AI can\'t look at pictures', a: ['The picture check needs a story AI that can see images, like the default Nemotron VL. With another model the comic is still drawn, just not checked. You can turn the check off in Settings → Pictures.'] },
     { q: '"ComfyUI took more than 30 minutes for one picture"', a: ['Your PC\'s ComfyUI works through one queue, so other jobs on it (like a sprite batch) go first. Let them finish, then tap Draw missing panels.'] },
+    { q: 'Leaving the app in the middle of a story or a picture', a: ['iPhone pauses apps added to the Home Screen as soon as you switch away, so nothing is written while you\'re gone. That can\'t be changed by any web app. Your work isn\'t lost: when you come back, the app carries on by itself. A story picks up from the last word it had, and pictures your PC or AI Horde were drawing meanwhile are collected. If iPhone closed the app completely (or App lock locked it), it finishes the story or comic on its own the next time you open it. A Horde picture left for more than about 10 minutes may be gone; the comic then just draws it again.'] },
+    { q: '"Load failed" or "The network connection was lost"', a: ['Fixed: this happened when you switched away from the app while it was writing. It now waits until you\'re back and carries on. If you still see it, check your internet connection and tap Generate (or Draw missing panels) again.'] },
+    { q: '"Couldn\'t reach the helper"', a: [['Is the helper window open on the PC, saying "ready on port 8190"? If not, double-click start-helper.bat.', 'Is Tailscale connected on the phone and the PC?',
+      'Did you run `tailscale serve --bg --set-path /helper 8190` on the PC? Type `tailscale serve status` to check: it should list /helper.', 'Does Settings → Laptop helper show your PC\'s https address ending in /helper?']] },
+    { q: '"This device isn\'t paired with the helper yet"', a: ['Each device pairs once. Close the helper window on the PC, double-click start-helper.bat again, then tap "Test and turn on notifications" on this device within 10 minutes.'] },
+    { q: 'No notification when the laptop finishes a story', a: [['Open the app from its Home Screen icon, not from Safari: iPhone only sends notifications to installed apps.', 'iPhone Settings → Notifications → Aetherstory: turn on Allow Notifications. Check that a Focus mode isn\'t hiding them.',
+      'In the app, Settings → Laptop helper → tap "Test and turn on notifications" again.', 'The helper window on the PC prints "Notification not sent" when Apple refused it; tap Test again to renew it.']] },
+    { q: 'Stories still stop when I leave the app', a: ['The helper wasn\'t reached when you tapped Generate, so the phone wrote the story. When the helper takes it, the pop-up says "Your laptop is writing this". Check Settings → Laptop helper → Test. The story still finishes when you come back.'] },
+    { q: '"The helper couldn\'t load the app"', a: ['The helper fetches the app\'s story steps from the internet. Check the PC is online and that the address in start-helper.bat is exactly the one in step 3 of the helper guide.'] },
     { q: '"This model may not read photos"', a: ['"Describe from a photo" needs a model that can see pictures. Add a free Gemini key under Settings → Photo AI.'] },
   ];
 
