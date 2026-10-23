@@ -1,4 +1,4 @@
-// Aetherstory laptop helper: writes stories on your PC so the phone can leave the app mid-story.
+// Aetherstory laptop helper: writes stories and draws comics on your PC so the phone can leave the app midway.
 // Start it with the app's address:  node helper.js https://romrepostacks.github.io/Aetherstory-APP/
 // It listens on 127.0.0.1:8190 only; `tailscale serve --bg --set-path /helper 8190` makes it reachable from your own devices.
 // No packages needed (Node 18 or newer). The story steps come from the app's own lib.js, fetched from the app's address,
@@ -63,27 +63,36 @@ async function chat(s, messages, { onToken, sofar = '', signal, stream = true } 
   }
 }
 
+// Pictures drawn here go back to the phone as they are (ComfyUI already sends them at 768px); the phone shrinks them to JPEG.
+const PIC_ENV = { fetch: (...a) => fetch(...a), poll: (...a) => fetch(...a),
+  pause: (ms, signal) => new Promise((res, rej) => { const t = setTimeout(res, ms); if (signal) signal.addEventListener('abort', () => { clearTimeout(t); rej(signal.reason); }, { once: true }); }),
+  toImage: async (blob) => `data:${blob.type || 'image/png'};base64,${Buffer.from(await blob.arrayBuffer()).toString('base64')}` };
+
 const jobs = new Map();
-async function run(job, { state, storyId, cut, push }) {
+async function run(job, { kind = 'story', state, storyId, cut, push }) {
   const A = await loadLib();
   const story = state.stories.find((x) => x.id === storyId);
   if (!story) throw new Error('The story was missing from the job.');
-  const signal = job.ctl.signal;
-  const io = { signal, save: async () => { job.stage = cut.stage; },
+  const signal = job.ctl.signal, s = state.settings;
+  job.cut = cut;
+  const io = { signal, save: async () => {},
     step: (i, detail = '') => Object.assign(job, { step: i, detail, frac: 0 }), note: (detail, frac) => Object.assign(job, { detail }, frac === undefined ? {} : { frac }),
     text: (t) => { job.text = t; },
-    chat: (m, o) => chat(state.settings, m, { ...o, signal }), json: async (m) => A.parseJsonLoose(await chat(state.settings, m, { signal, stream: false })) };
+    chat: (m, o) => chat(s, m, { ...o, signal }), json: async (m) => A.parseJsonLoose(await chat(s, m, { signal, stream: false })),
+    draw: (prompt, onWait, opts) => A.drawPicture(s, prompt, onWait, opts, PIC_ENV),
+    landed: (p) => { if (p) job.imgs.push({ i: story.panels.indexOf(p), img: p.img }); job.story = story; } };
+  job.imgs = []; job.story = story;
   try {
-    job.status = await A.storyJob(state, story, cut, io);
-    job.result = { story, world: state.world, characters: state.characters };
+    job.status = kind === 'comic' ? await A.comicJob(state, story, cut, io) : await A.storyJob(state, story, cut, io);
+    // A comic's panels and pictures already went over in the progress reports; only the seed and the characters' body tags are left.
+    job.result = kind === 'comic' ? { story: { seed: story.seed }, world: {}, characters: state.characters } : { story, world: state.world, characters: state.characters };
     job.done = true;
-    console.log(`Story "${story.title}" done.`);
+    console.log(`${kind === 'comic' ? 'Comic' : 'Story'} "${story.title}" done.`);
   } catch (e) {
     if (signal.aborted) return;
     job.error = e.message;
-    console.log('Story failed: ' + e.message);
+    console.log(`${kind === 'comic' ? 'Comic' : 'Story'} failed: ${e.message}`);
   }
-  job.stage = cut.stage;
   job.ended = Date.now();
   await notify(push);
 }
@@ -109,25 +118,29 @@ http.createServer(async (req, res) => {
     keys.secrets.push(secret); saveKeys(); console.log(`Paired a device (${keys.secrets.length} paired).`);
   }
 
-  if (req.method === 'GET' && route === '/hello') return send(res, 200, { ok: true, name: require('os').hostname(), vapid: vapidPublic });
+  if (req.method === 'GET' && route === '/hello') return send(res, 200, { ok: true, name: require('os').hostname(), vapid: vapidPublic, kinds: ['story', 'comic'] });
   if (req.method === 'POST' && route === '/jobs') {
     let raw = '';
     for await (const chunk of req) { raw += chunk; if (raw.length > 20e6) return send(res, 413, { error: 'too big' }); }
     let body;
     try { body = JSON.parse(raw); } catch (e) { return send(res, 400, { error: 'bad job' }); }
     const id = crypto.randomUUID();
-    const job = { ctl: new AbortController(), step: 0, detail: 'Starting.', frac: 0, text: null, stage: body.cut && body.cut.stage };
+    const job = { ctl: new AbortController(), step: 0, detail: 'Starting.', frac: 0, text: null, cut: body.cut, imgs: [] };
     jobs.set(id, job);
     run(job, body).catch((e) => { job.error = e.message; job.ended = Date.now(); });
-    console.log('Writing a story for your phone.');
+    console.log(body.kind === 'comic' ? 'Drawing a comic for your phone.' : 'Writing a story for your phone.');
     return send(res, 200, { id });
   }
   const m = route.match(/^\/jobs\/([\w-]+)$/);
   const job = m && jobs.get(m[1]);
   if (m && !job) return send(res, 404, { error: 'No such job (the helper may have restarted).' });
   if (job && req.method === 'GET') {
-    const { step, detail, frac, text, stage, done, status, error, result } = job;
-    return send(res, 200, { step, detail, frac, text, stage, done: !!done, status, error, result: done ? result : undefined });
+    // A comic report carries its panel plan without pictures ('kept' = the phone had it, 'drawn' = sent in imgs), plus the pictures
+    // drawn since the phone's last report (?since=N).
+    const { step, detail, frac, text, cut, done, status, error, result } = job;
+    const panels = job.story && job.story.panels && job.story.panels.map((p) => ({ ...p, img: p.img === 'kept' ? 'kept' : p.img ? 'drawn' : '' }));
+    const since = Number(new URL(req.url, 'http://x').searchParams.get('since')) || 0;
+    return send(res, 200, { step, detail, frac, text, cut, stage: cut && cut.stage, done: !!done, status, error, panels, imgs: job.imgs.slice(since), result: done ? result : undefined });
   }
   if (job && req.method === 'DELETE') { job.ctl.abort(); jobs.delete(m[1]); return send(res, 200, { ok: true }); }
   send(res, 404, { error: 'not found' });

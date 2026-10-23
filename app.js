@@ -363,34 +363,64 @@ async function helperHello() {
   if (!res.ok || !d.ok) throw new Error(d.error || `The helper answered ${res.status}. Check the address ends in /helper.`); // ComfyUI's own pages answer here too when no helper is set up
   return d;
 }
-const helperUp = () => (helperBase() ? helperHello().then(() => true, () => false) : false);
+const helperUp = (kind = 'story') => (helperBase() ? helperHello().then((d) => (d.kinds || ['story']).includes(kind), () => false) : false); // older helpers only write stories
 // Sends the job, then mirrors the laptop's progress into the pop-up. Returns the status line, or null when the helper
 // no longer has the job (restarted) so this phone carries on.
-async function onHelper(story, cut, io) {
-  const base = helperBase(), headers = helperHeaders(), away = '\nYour laptop is writing this, so you can switch apps: you\'ll get a notification when it\'s done.';
+// Sends a job (kind 'story' or 'comic') and polls it, handing each progress report to `each`. Returns the finished report,
+// or null when the helper no longer has the job (laptop gone or restarted) so this device carries on from what it collected.
+async function helperJob(kind, story, cut, io, each, query = () => '') {
+  const base = helperBase(), headers = helperHeaders();
   if (!cut.helper) {
-    io.step(0, 'Sending the story to your laptop.' + away);
     const res = await fetch(base + '/jobs', { method: 'POST', headers, signal: io.signal,
-      body: JSON.stringify({ state: A.helperState(state, story), storyId: story.id, cut, push: state.settings.pushSub || null }) });
+      body: JSON.stringify({ kind, state: A.helperState(state, story, { panels: kind === 'comic' }), storyId: story.id, cut, push: state.settings.pushSub || null }) });
     const d = await res.json().catch(() => ({}));
-    if (!res.ok || !d.id) throw new Error(`The laptop helper refused the story (${d.error || res.status}).`);
+    if (!res.ok || !d.id) throw new Error(`The laptop helper refused the job (${d.error || res.status}).`);
     cut.helper = d.id; await save();
   }
   const drop = () => fetch(`${base}/jobs/${cut.helper}`, { method: 'DELETE', headers }).catch(() => {});
   io.signal.addEventListener('abort', drop, { once: true }); // Cancel stops the laptop too
-  let at = -1;
   for (;;) {
     await pause(1500, io.signal);
-    const res = await fetchBack(`${base}/jobs/${cut.helper}`, { headers, signal: io.signal }).catch((e) => { if (io.signal.aborted) throw e; });
-    if (!res || res.status === 404) { delete cut.helper; return null; } // laptop gone or restarted: carry on here from the last text it sent
+    const res = await fetchBack(`${base}/jobs/${cut.helper}${query()}`, { headers, signal: io.signal }).catch((e) => { if (io.signal.aborted) throw e; });
+    if (!res || res.status === 404) { delete cut.helper; return null; }
     const r = await res.json();
-    if (r.text != null && r.text !== story.text) { story.text = r.text; io.text(r.text); }
-    cut.stage = r.stage;
-    if (r.step !== at) { at = r.step; io.step(r.step, r.detail + away); } else io.note(r.detail + away, r.frac);
+    if (r.cut) Object.assign(cut, r.cut, { helper: cut.helper }); else if (r.stage) cut.stage = r.stage; // older helpers only sent the stage
+    await each(r);
     if (r.error) { drop(); throw new Error(r.error); }
-    if (r.done) { A.applyHelperResult(state, story, r.result); drop(); return r.status; }
+    if (r.done) { A.applyHelperResult(state, story, r.result); drop(); return r; }
   }
 }
+const awayNote = (what) => `\nYour laptop is ${what}, so you can switch apps: you'll get a notification when it's done.`;
+// Mirrors the pop-up's steps and percentage from the helper's reports.
+const mirror = (io, away) => { let at = -1; return (r) => { if (r.step !== at) { at = r.step; io.step(r.step, r.detail + away); } else if (io.note) io.note(r.detail + away, r.frac); }; };
+async function onHelper(story, cut, io) {
+  const away = awayNote('writing this'), show = mirror(io, away);
+  if (!cut.helper) io.step(0, 'Sending the story to your laptop.' + away);
+  const r = await helperJob('story', story, cut, io, (x) => {
+    if (x.text != null && x.text !== story.text) { story.text = x.text; io.text(x.text); }
+    show(x);
+  });
+  return r && r.status;
+}
+// Comic panels arrive one by one as the laptop draws them; each is shrunk to the library's JPEG here and saved, so they show up as they land.
+async function onHelperComic(story, io) {
+  const cut = story.comicCut, away = awayNote('drawing this'), show = mirror(io, away);
+  const kept = (story.panels || []).map((p) => p.img), got = [];
+  let since = 0;
+  if (!cut.helper) io.step(0, 'Sending the comic to your laptop.' + away);
+  const r = await helperJob('comic', story, cut, io, async (x) => {
+    for (const { i, img } of x.imgs || []) got[i] = await shrinkImage(dataBlob(img));
+    since += (x.imgs || []).length;
+    if (x.panels) {
+      const grew = x.panels.length !== (story.panels || []).length;
+      story.panels = x.panels.map((m, i) => ({ ...m, img: got[i] || (m.img ? kept[i] || '' : '') })); // 'kept' or 'drawn': this device has it already
+      if ((x.imgs || []).length || grew) { await save(); io.landed(); }
+    }
+    show(x);
+  }, () => `?since=${since}`);
+  return r && r.status;
+}
+const dataBlob = (url) => { const [head, b64] = url.split(','); return new Blob([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], { type: head.slice(5).split(';')[0] }); };
 // Notifications: the helper pings Apple's or Google's push service with an empty message (no story text in it),
 // and sw.js shows a fixed "your story is ready".
 async function helperPair(msg) {
@@ -542,171 +572,38 @@ const pause = (ms, signal) => new Promise((res, rej) => {
   const t = setTimeout(res, ms);
   if (signal) signal.addEventListener('abort', () => { clearTimeout(t); rej(signal.reason); }, { once: true });
 });
-// Who draws the pictures, in words for the pop-up.
-const artist = () => (state.settings.comfyUrl && !comfyNote ? 'your PC (ComfyUI)' : 'AI Horde\'s volunteer computers');
-// AI Horde's queue check, in words: place in line, its own time estimate, or that someone is drawing it now.
-const waitText = (c = {}) => [c.processing ? 'An artist is drawing it now' : c.queue_position ? `#${c.queue_position} in line` : '',
-  c.wait_time ? `about ${fmtSecs(c.wait_time)} left` : ''].filter(Boolean).join(', ');
-
-// ---------- pictures: AI Horde, free volunteer-run image generation (anonymous works; a free key gets them sooner) ----------
-const HORDE = 'https://aihorde.net/api/v2';
-// Every picture is 2D anime/manhwa art, never realistic or 3D: anime-trained models only, plus the style in the prompt and its opposite in the negative.
-// ponytail: fixed list from the Horde model reference; if pictures start failing with "no artist free", add whichever anime models have workers now.
-const ANIME_MODELS = ['Animagine XL', 'Hassaku XL', 'Nova Anime XL', 'AAM XL', 'Anything Diffusion', 'Anything v5', 'Counterfeit', 'Pastel Mix', 'Cetus-Mix', 'AnyLoRA'];
-const NEGATIVE = 'photorealistic, realistic, photo, photography, 3d, 3d render, cgi, octane render, unreal engine, doll, plastic skin, ' +
-  'text, speech bubble, watermark, signature, lowres, blurry, deformed, extra fingers, bad anatomy';
-// Every picture goes through here: the user's own ComfyUI when set up, AI Horde otherwise (and as its backup outside Private mode).
-// Explicit pictures carry the Spice level's tags; portraits (nsfw: false) never do.
-const PRIVATE_PICTURES = 'Pictures are off in Private mode: AI Horde\'s volunteer computers would see the descriptions. Draw them on your own PC with ComfyUI instead (Settings → Help & guides).';
+// ---------- pictures: lib.drawPicture does the drawing (ComfyUI on the user's PC first, AI Horde otherwise), so the laptop helper draws the same way ----------
+const PRIVATE_PICTURES = A.PRIVATE_PICTURES;
 const canDraw = () => !state.settings.privateOnly || !!state.settings.comfyUrl;
+const waitText = A.waitText;
 let comfyNote = ''; // why the last picture went to Horde instead of the PC, shown with the progress
-let lastDraw = {}; // what the last picture was sent as ({ by, model, prompt }), kept on comic panels for the developer view
-// model: a ComfyUI checkpoint for this picture (default: the one in Settings); seed: the same one across a comic keeps its look steadier.
-async function drawImage(prompt, onWait, { width = 512, height = 768, nsfw = !!state.settings.mature, signal, model, seed } = {}) {
-  const s = state.settings;
-  prompt = [nsfw && A.spiceText(s, 'image'), prompt].filter(Boolean).join(', '); // Spice tags first: image models weigh the start most
-  if (s.comfyUrl) {
-    try { const img = await drawComfy(prompt, onWait, { width, height, nsfw, signal, model, seed }); comfyNote = ''; return img; } catch (e) {
-      if (signal && signal.aborted) throw e; // cancelled, not broken: don't hand it to Horde
-      const why = comfyError(e);
-      if (s.privateOnly) throw new Error(why + ' Private mode is on, so AI Horde isn\'t used instead. See Settings → Help & guides.');
-      comfyNote = ` ${why} AI Horde is drawing instead.`;
-    }
-  } else if (s.privateOnly) throw new Error(PRIVATE_PICTURES);
-  return drawHorde(prompt, onWait, { width, height, nsfw, signal, seed });
+const artist = () => A.artist(state.settings, comfyNote);
+const PIC_ENV = { fetch: (...a) => fetch(...a), poll: fetchBack, pause, toImage: (blob) => shrinkImage(blob) };
+async function drawImage(prompt, onWait, opts = {}) {
+  return (await A.drawPicture(state.settings, prompt, onWait, { ...opts, onNote: (n) => { comfyNote = n; } }, PIC_ENV)).img;
 }
+const comfyError = (e) => A.comfyError(state.settings, e);
+const comfyBase = () => A.comfyBase(state.settings);
+const comfyModels = () => A.comfyModels(state.settings, PIC_ENV);
 
-// ---------- pictures on the user's own PC: ComfyUI started with --enable-cors-header (guide in help.js) ----------
-// fetch throws TypeError only when nothing answered (ComfyUI closed, wrong address, blocked by the browser).
-const comfyError = (e) => (e instanceof TypeError || e.name === 'TimeoutError' ? `Couldn't reach ComfyUI at ${state.settings.comfyUrl}.` : e.message);
-const comfyBase = () => state.settings.comfyUrl.trim().replace(/\/+$/, '');
-async function comfyModels() {
-  const res = await fetch(comfyBase() + '/object_info/CheckpointLoaderSimple', { signal: AbortSignal.timeout(15e3) });
-  if (!res.ok) throw new Error(`ComfyUI answered ${res.status}. Check the start file has --enable-cors-header (Help → ComfyUI answers 403).`);
-  const opt = (await res.json()).CheckpointLoaderSimple.input.required.ckpt_name;
-  return Array.isArray(opt[0]) ? opt[0] : (opt[1] && opt[1].options) || []; // older and newer ComfyUI list choices differently
-}
-async function drawComfy(prompt, onWait, { width, height, nsfw, signal, model, seed }) {
-  model = model || state.settings.comfyModel || (await comfyModels())[0];
-  if (!model) throw new Error('ComfyUI has no model yet. Put an anime model in ComfyUI\'s models\\checkpoints folder and restart it.');
-  const k = Math.sqrt(1024 * 1024 / (width * height)), px = (x) => Math.round((x * k) / 64) * 64; // SDXL models draw best near one megapixel
-  const workflow = {
-    1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
-    2: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: (prompt = `masterpiece, best quality, ${prompt}, anime style, 2d illustration`) } },
-    3: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: NEGATIVE + (nsfw ? '' : ', nsfw, nude') } },
-    4: { class_type: 'EmptyLatentImage', inputs: { width: px(width), height: px(height), batch_size: 1 } },
-    5: { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0],
-      seed: seed ?? Math.floor(Math.random() * 2 ** 32), steps: 20, cfg: 7, sampler_name: 'euler_ancestral', scheduler: 'normal', denoise: 1 } },
-    6: { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
-    7: { class_type: 'PreviewImage', inputs: { images: ['6', 0] } }, // ComfyUI's temp folder: nothing piles up in its output folder
-  };
-  const res = await fetch(comfyBase() + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }), signal });
-  const job = await res.json().catch(() => ({}));
-  if (!res.ok || !job.prompt_id) throw new Error(`ComfyUI refused the picture (${(job.error && job.error.message) || res.status}).`);
-  lastDraw = { by: 'ComfyUI', model, prompt };
-  const started = Date.now();
-  // ponytail: Cancel stops waiting but lets ComfyUI finish the one picture it's on (seconds); POST /interrupt if that ever matters.
-  for (;;) {
-    await pause(1500, signal);
-    const run = (await (await fetchBack(`${comfyBase()}/history/${job.prompt_id}`, { signal })).json())[job.prompt_id];
-    const img = run && Object.values(run.outputs || {}).flatMap((o) => o.images || [])[0];
-    if (img) return shrinkImage(await (await fetchBack(`${comfyBase()}/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`, { signal })).blob());
-    if (run && run.status && run.status.status_str === 'error') throw new Error('ComfyUI hit an error drawing this picture; its window shows why.');
-    // The PC's ComfyUI may be busy with other jobs first (it runs one queue), so allow a long wait.
-    if (Date.now() - started > 30 * 60e3) throw new Error('ComfyUI took more than 30 minutes for one picture. Is something else filling its queue?');
-    if (onWait) onWait({ processing: true });
-  }
-}
-
-async function drawHorde(prompt, onWait, { width, height, nsfw, signal, seed }) {
-  const headers = { 'Content-Type': 'application/json', apikey: state.settings.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-APP' };
-  prompt = `anime style, 2d illustration, ${prompt} ### ${NEGATIVE}${nsfw ? '' : ', nsfw, nude'}`;
-  const res = await fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt,
-    params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7, ...(seed != null ? { seed: String(seed) } : {}) }, nsfw, censor_nsfw: false, r2: false, models: ANIME_MODELS }), signal });
-  const job = await res.json().catch(() => ({}));
-  if (!res.ok || !job.id) throw new Error(`The picture request failed (${res.status}). ${job.message || ''}`);
-  lastDraw = { by: 'AI Horde', model: 'an anime model', prompt };
-  const started = Date.now();
-  const drop = () => fetch(`${HORDE}/generate/status/${job.id}`, { method: 'DELETE', headers }).catch(() => {}); // frees the volunteers for someone else
-  try {
-    for (;;) {
-      await pause(6000, signal);
-      const c = await (await fetchBack(`${HORDE}/generate/check/${job.id}`, { headers, signal })).json().catch(() => ({}));
-      if (c.done) break;
-      if (c.faulted || c.is_possible === false || Date.now() - started > 15 * 60e3) { drop(); throw new Error('No artist was free for this picture right now.'); }
-      if (onWait) onWait(c);
-    }
-  } catch (e) { if (signal && signal.aborted) drop(); throw e; }
-  const g = ((await (await fetchBack(`${HORDE}/generate/status/${job.id}`, { headers, signal })).json()).generations || [])[0];
-  if (!g || !g.img || g.censored) throw new Error(g && g.censored ? 'The artist\'s filter blocked this picture.' : 'No picture came back.');
-  const blob = g.img.startsWith('http') ? await (await fetchBack(g.img)).blob() : new Blob([Uint8Array.from(atob(g.img), (ch) => ch.charCodeAt(0))], { type: 'image/webp' });
-  return shrinkImage(blob);
-}
-
-// Turns a story into manhwa panels. Slower on purpose, for accuracy: the story AI plans it a part at a time and fact-checks each part's plan,
-// then panels are drawn one at a time in story order, each saved as it lands (leaving midway loses nothing) and, when the AI can see pictures,
-// checked against the story and redrawn once if it's wrong.
+// Turns a story into manhwa panels (lib.comicJob). On the laptop helper when it answers, so leaving the app doesn't stop it;
+// otherwise on this device, each panel saved as it lands (leaving midway loses nothing).
 // ponytail: images live in the library as JPEG data URLs (~60 KB each); move them to their own store if saves or backups get slow.
 async function makeComic(story, replan) {
   if (ui.drawing) return;
   if (!canDraw()) return setStatus(PRIVATE_PICTURES);
-  const s = state.settings, plan = replan || !(story.panels || []).length;
+  const plan = replan || !(story.panels || []).length;
   const steps = ['Learning how each character looks', plan && 'Planning and fact-checking the panels', 'Drawing and checking the panels'].filter(Boolean);
   const j = startJob('Making your comic', steps);
   if (!j) return;
   const here = () => ui.view === 'stories' && ui.param === story.id;
-  const signal = j.signal, quiet = (e) => { if (signal.aborted) throw e; }; // an AI check that fails is skipped, a Cancel isn't
   ui.drawing = story.id; ui.comic = true; ui.status = ''; render();
-  story.comicCut = { replan: plan }; // saved when the app is hidden, cleared when done
+  story.comicCut = story.comicCut || { replan: plan }; // saved when the app is hidden, cleared when done
+  const io = { signal: j.signal, step: j.step, save, json: (m) => chatJson(m, { signal: j.signal }),
+    draw: (prompt, onWait, opts) => A.drawPicture(state.settings, prompt, onWait, opts, PIC_ENV), landed: () => { if (here()) render(); } };
   try {
-    const cast = state.characters.filter((c) => (story.characterIds || []).includes(c.id)).filter(A.needsLook);
-    j.step(0, 'Your story AI writes fixed body tags (build, size, hair, face) for each character, so they look the same in every panel.');
-    if (cast.length) try { A.applyLooks(cast, await chatJson(A.buildLookMessages(cast), { signal })); await save(); } catch (e) { quiet(e); } // without them, the written appearance is used
-    if (plan) {
-      const parts = A.comicParts(story.text), total = A.panelCount(story.text), words = (t) => t.split(/\s+/).length, all = words(story.text);
-      const panels = [];
-      for (const [i, part] of parts.entries()) {
-        const where = parts.length > 1 ? ` (part ${i + 1} of ${parts.length})` : '';
-        j.step(1, `Part ${i + 1} of ${parts.length}: splitting it into scenes, with a caption and speech bubbles for each.`);
-        let mine = A.toPanels(state, await chatJson(A.buildPanelMessages(state, story, part, Math.max(1, Math.round(total * words(part) / all)), panels[panels.length - 1], where), { signal }), part);
-        j.step(1, `Part ${i + 1} of ${parts.length}: fact-checking the panels against the story and character sheets (order, who is there, clothes, what is explicit).`);
-        try { mine = A.applyPanelCheck(mine, await chatJson(A.buildPanelCheckMessages(state, story, part, mine), { signal })); } catch (e) { quiet(e); } // unreadable check: keep the plan
-        panels.push(...mine);
-      }
-      if (!panels.length) throw new Error('No panels came back.');
-      story.panels = panels; story.comicCut.replan = false;
-      await save(); if (here()) render();
-    }
-    const step = steps.length - 1, todo = story.panels.filter((p) => !p.img), total = todo.length;
-    story.seed = story.seed ?? Math.floor(Math.random() * 2 ** 31); // one seed per comic keeps the look steadier; a redraw shifts it
-    let done = 0, canCheck = s.checkPictures !== false, doing = '', checkNote = '';
-    const progress = (c) => j.step(step, [`${done} of ${total} panels done${doing ? ', ' + doing : ''}. Drawing on ${artist()}.`, waitText(c), comfyNote.trim(), checkNote,
-      'Finished panels appear on the page as they land, so Hide lets you watch.'].filter(Boolean).join('\n'));
-    // One at a time, in story order: the PC's ComfyUI and Horde work through them in turn anyway.
-    for (const p of todo) {
-      const explicit = !!(s.mature && p.explicit !== false && (p.explicit || !p.scene)); // older comics have no explicit flag: drawn as before
-      const draw = async () => {
-        doing = 'drawing the next'; progress();
-        p.img = await drawImage(p.scene ? A.panelPrompt(state, p) : p.prompt, progress, { signal, nsfw: explicit, model: (explicit && s.comfyNsfwModel) || undefined, seed: story.seed + (p.redraws || 0) * 7919 });
-        p.sent = lastDraw; p.check = '';
-        await save(); if (here()) render();
-      };
-      await draw();
-      if (canCheck && p.scene) {
-        doing = 'checking it matches the story'; progress();
-        try {
-          const r = await chatJson(A.buildPictureCheckMessages(state, p, p.img), { signal });
-          if (r && r.ok === false) {
-            const why = String(r.problem || 'it didn\'t match').trim();
-            p.redraws = (p.redraws || 0) + 1; await draw();
-            p.check = `First picture was redrawn: ${why}`;
-          } else p.check = 'Checked: matches the story.';
-        } catch (e) { quiet(e); canCheck = false; checkNote = 'Your story AI can\'t look at pictures, so the rest aren\'t checked.'; }
-        await save();
-      }
-      done++; doing = '';
-    }
-    ui.status = 'Comic ready.';
+    const left = story.comicCut.helper || await helperUp('comic') ? await onHelperComic(story, io) : null;
+    ui.status = left === null ? await A.comicJob(state, story, story.comicCut, io) : left; // no helper, or it lost the job: draw here
     j.end();
   } catch (e) {
     ui.status = j.signal.aborted ? 'Comic stopped. Panels already drawn are kept: tap "Draw missing panels" to carry on.' : e.message + ' Tap "Draw missing panels" to try again.';
