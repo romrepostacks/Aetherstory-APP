@@ -568,12 +568,20 @@
   function panelPrompt(state, panel) {
     const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
     const clothes = (c) => { const v = (panel.clothes || {})[Object.keys(panel.clothes || {}).find((n) => n.toLowerCase() === c.name.toLowerCase())]; return str(v); };
-    const looks = who.map((c) => `(${c.lookTags || (c.appearance ? c.appearance.slice(0, 160) : gendered(c, 'a woman', 'a man', 'a person'))}${clothes(c) ? ', wearing ' + clothes(c) : ''})`).join(' and ');
+    // Each person's looks start with their own head tag, so the model keeps two people's hair, build and clothes apart instead of blending them into one.
+    const own = (c) => ({ f: '1girl, ', m: '1boy, ' })[characterGender(c)] || '';
+    const look = (c) => c.lookTags || (c.appearance ? c.appearance.slice(0, 160) : gendered(c, 'a woman', 'a man', 'a person'));
+    const looks = who.map((c) => `(${who.length > 1 && !/^\d(girl|boy)/.test(look(c)) ? own(c) : ''}${look(c)}${clothes(c) ? ', wearing ' + clothes(c) : ''})`).join(' and ');
+    // Names mean nothing to an image model, so in the scene each one becomes a short look ("red hair girl"), which ties the action to the right person.
+    const short = (c) => `${String(c.lookTags || '').split(',').map((t) => t.trim()).filter((t) => /hair|braid|ponytail|twintail|\bbob\b|\bbun\b/.test(t))[0] || ''} ${gendered(c, 'girl', 'man', 'person')}`.trim();
+    let scene = str(panel && panel.scene);
+    for (const c of who) for (const n of new Set([c.name, c.name.split(' ')[0]])) scene = scene.replace(new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}('s)?\\b`, 'gi'), (m, poss) => `the ${short(c)}${poss || ''}`);
     // Anime models are trained on head-count tags (1girl, 2boys), so without them a two-person act often comes out as one person.
     const count = (g, word) => { const n = who.filter((c) => characterGender(c) === g).length; return n ? `${n}${word}${n > 1 ? 's' : ''}` : ''; };
     const heads = [count('f', 'girl'), count('m', 'boy')].filter(Boolean).join(', ') || (who.length ? '' : 'no humans');
+    // The people come right after the counts: image models weigh the start of a prompt most, and a long scene would push them out of reach.
     return [[heads, str(panel && panel.tags), panel && panel.explicit === false ? 'clothed' : ''].filter(Boolean).join(', '),
-      str(panel && panel.scene), str(panel && panel.setting), looks, COMIC_STYLE].filter(Boolean).join('. ').slice(0, 1500);
+      looks, scene, str(panel && panel.setting), COMIC_STYLE].filter(Boolean).join('. ').slice(0, 1500);
   }
   // A head-and-shoulders picture from the written appearance only; the name means nothing to the image model.
   const PORTRAIT_STYLE = 'anime portrait, head and shoulders, looking at viewer, manhwa webtoon style, 2d illustration, full color, clean line art, flat cel shading, anime eyes, simple soft background';
@@ -1036,6 +1044,17 @@
     return { img: await env.toImage(blob), sent };
   }
 
+  // Which ComfyUI model draws a panel, from what the plan says the scene is: explicit panels go to a model that can draw them
+  // (the one picked in Settings, else one whose name says it: NoobAI, Pony, Illustrious, WAI, NSFW...), everything else to the
+  // everyday model (Settings, else the first that isn't one of those). Returns { model, why } or null to let ComfyUI's default draw.
+  // ponytail: two kinds of scene, judged by model names; map more scene kinds (action, scenery) when models with clear strengths get added.
+  const SPICY_MODEL = /nsfw|noob|pony|illustrious|\bwai|hentai|lewd|r18/i;
+  function pickModel(s, models, explicit) {
+    const spicy = models.find((m) => SPICY_MODEL.test(m)), tame = models.find((m) => !SPICY_MODEL.test(m));
+    const model = explicit ? s.comfyNsfwModel || spicy || s.comfyModel : s.comfyModel || tame || models[0];
+    return model ? { model, why: explicit ? 'explicit scene' : 'everyday scene' } : null;
+  }
+
   // Turns a story into manhwa panels. Slower on purpose, for accuracy: the story AI plans it a part at a time and fact-checks each part's plan,
   // then panels are drawn one at a time in story order, each saved as it lands and, when the AI can see pictures, checked against the story
   // and redrawn once if it's wrong. Runs in the app and on the laptop helper. `cut.replan` plans again from scratch.
@@ -1064,16 +1083,20 @@
     const step = plan ? 2 : 1, todo = story.panels.filter((p) => !p.img), total = todo.length;
     story.seed = story.seed ?? Math.floor(Math.random() * 2 ** 31); // one seed per comic keeps the look steadier; a redraw shifts it
     let done = 0, canCheck = s.checkPictures !== false, doing = '', checkNote = '', note = '';
-    const progress = (c) => io.step(step, [`${done} of ${total} panels done${doing ? ', ' + doing : ''}. Drawing on ${artist(s, note)}.`, waitText(c), note.trim(), checkNote,
+    const models = s.comfyUrl && io.models ? await io.models().catch(() => []) : [];
+    let model = '';
+    const progress = (c) => io.step(step, [`${done} of ${total} panels done${doing ? ', ' + doing : ''}. Drawing on ${artist(s, note)}${!note && model ? ` with ${model}` : ''}.`, waitText(c), note.trim(), checkNote,
       'Finished panels appear on the page as they land, so Hide lets you watch.'].filter(Boolean).join('\n'));
     // One at a time, in story order: the PC's ComfyUI and Horde work through them in turn anyway.
     for (const p of todo) {
       const explicit = !!(s.mature && p.explicit !== false && (p.explicit || !p.scene)); // older comics have no explicit flag: drawn as before
+      const pick = pickModel(s, models, explicit);
+      model = pick && pick.model;
       const draw = async () => {
         doing = 'drawing the next'; progress();
         const r = await io.draw(p.scene ? panelPrompt(state, p) : p.prompt, progress,
-          { signal, nsfw: explicit, model: (explicit && s.comfyNsfwModel) || undefined, seed: story.seed + (p.redraws || 0) * 7919, onNote: (n) => { note = n; } });
-        p.img = r.img; p.sent = r.sent; p.check = '';
+          { signal, nsfw: explicit, model: pick ? pick.model : (explicit && s.comfyNsfwModel) || undefined, seed: story.seed + (p.redraws || 0) * 7919, onNote: (n) => { note = n; } });
+        p.img = r.img; p.sent = { ...r.sent, ...(pick && r.sent.by === 'ComfyUI' ? { why: pick.why } : {}) }; p.check = '';
         await io.save(); io.landed(p);
       };
       await draw();
@@ -1158,7 +1181,7 @@
   const unseal = decryptWith;
 
   const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, trimRepeat, buildCheckMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, carryOn, ask, storyJob, helperState, applyHelperResult,
-    PRIVATE_PICTURES, fmtSecs, waitText, artist, comfyBase, comfyError, comfyModels, drawPicture, comicJob, replyText, freeFallbacks, describeWorld, currentRelationships,
+    PRIVATE_PICTURES, fmtSecs, waitText, artist, comfyBase, comfyError, comfyModels, drawPicture, comicJob, pickModel, replyText, freeFallbacks, describeWorld, currentRelationships,
     SPICE, spiceText, memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, portraitPrompt, toPanels,
     comicParts, buildPanelCheckMessages, applyPanelCheck, needsLook, buildLookMessages, applyLooks, buildPictureCheckMessages,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
