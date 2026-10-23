@@ -86,7 +86,11 @@ function chatOnce(messages, { use, ...opts } = {}) {
 }
 
 async function chatJson(messages, opts) {
-  return A.parseJsonLoose(await chat(messages, { stream: false, ...opts }));
+  // A broken reply gets one fresh try; models rarely make the same slip twice.
+  try { return A.parseJsonLoose(await chat(messages, { stream: false, ...opts })); } catch (e) {
+    if (e instanceof SyntaxError || /No JSON/.test(e.message)) return A.parseJsonLoose(await chat(messages, { stream: false, ...opts }));
+    throw e;
+  }
 }
 // Photos can go to a separate free vision AI (Google Gemini by default) when its key is set; otherwise the main AI reads them.
 // Gemini's free tier may keep what it's sent, so Private mode keeps photos on the main AI.
@@ -422,7 +426,7 @@ async function onHelperComic(story, io) {
 }
 const dataBlob = (url) => { const [head, b64] = url.split(','); return new Blob([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], { type: head.slice(5).split(';')[0] }); };
 // Notifications: the helper pings Apple's or Google's push service with an empty message (no story text in it),
-// and sw.js shows a fixed "your story is ready".
+// and sw.js shows a fixed "your story or comic has finished".
 async function helperPair(msg) {
   const s = state.settings;
   msg.textContent = 'Connecting…';

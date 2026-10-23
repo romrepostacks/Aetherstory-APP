@@ -78,7 +78,12 @@ async function run(job, { kind = 'story', state, storyId, cut, push }) {
   const io = { signal, save: async () => {},
     step: (i, detail = '') => Object.assign(job, { step: i, detail, frac: 0 }), note: (detail, frac) => Object.assign(job, { detail }, frac === undefined ? {} : { frac }),
     text: (t) => { job.text = t; },
-    chat: (m, o) => chat(s, m, { ...o, signal }), json: async (m) => A.parseJsonLoose(await chat(s, m, { signal, stream: false })),
+    chat: (m, o) => chat(s, m, { ...o, signal }), json: async (m) => { // a broken reply gets one fresh try, like on the phone
+      try { return A.parseJsonLoose(await chat(s, m, { signal, stream: false })); } catch (e) {
+        if (e instanceof SyntaxError || /No JSON/.test(e.message)) return A.parseJsonLoose(await chat(s, m, { signal, stream: false }));
+        throw e;
+      }
+    },
     draw: (prompt, onWait, opts) => A.drawPicture(s, prompt, onWait, opts, PIC_ENV), models: () => A.comfyModels(s, PIC_ENV),
     landed: (p) => { if (p) job.imgs.push({ i: story.panels.indexOf(p), img: p.img }); job.story = story; } };
   job.imgs = []; job.story = story;

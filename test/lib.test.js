@@ -61,6 +61,9 @@ test('quickstart builds world and cast', () => {
 test('parseJsonLoose handles fenced replies', () => {
   assert.deepEqual(A.parseJsonLoose('Sure!\n```json\n{"a": {"b": 1}}\n```'), { a: { b: 1 } });
   assert.throws(() => A.parseJsonLoose('nope'));
+  // unescaped dialogue quotes, a raw line break and a trailing comma
+  assert.deepEqual(A.parseJsonLoose('{"panels": [{"say": "She yells "Run!" at him", "scene": "rain\nfalls",},]}'),
+    { panels: [{ say: 'She yells "Run!" at him', scene: 'rain\nfalls' }] });
 });
 
 test('parseSSE splits tokens and keeps partial lines', () => {
