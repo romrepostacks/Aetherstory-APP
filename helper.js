@@ -79,9 +79,16 @@ async function run(job, { kind = 'story', state, storyId, cut, push }) {
     step: (i, detail = '') => Object.assign(job, { step: i, detail, frac: 0 }), note: (detail, frac) => Object.assign(job, { detail }, frac === undefined ? {} : { frac }),
     text: (t) => { job.text = t; },
     chat: (m, o) => chat(s, m, { ...o, signal }), json: async (m) => A.parseJsonLoose(await chat(s, m, { signal, stream: false })),
-    draw: (prompt, onWait, opts) => A.drawPicture(s, prompt, onWait, opts, PIC_ENV),
+    draw: (prompt, onWait, opts) => A.drawPicture(s, prompt, onWait, opts, PIC_ENV), models: () => A.comfyModels(s, PIC_ENV),
     landed: (p) => { if (p) job.imgs.push({ i: story.panels.indexOf(p), img: p.img }); job.story = story; } };
   job.imgs = []; job.story = story;
+  // The phone's ComfyUI address is usually this PC's own Tailscale https name, which a PC can't always reach from itself.
+  // Then use ComfyUI on this PC directly (ComfyUI's usual port, then the guide's), instead of falling back to AI Horde's different models.
+  if (kind === 'comic' && s.comfyUrl) {
+    for (const url of [s.comfyUrl, 'http://127.0.0.1:8188', 'http://127.0.0.1:8189']) {
+      try { await A.comfyModels({ ...s, comfyUrl: url }, PIC_ENV); if (url !== s.comfyUrl) console.log(`Drawing on ComfyUI at ${url}.`); s.comfyUrl = url; break; } catch (e) { /* try the next */ }
+    }
+  }
   try {
     job.status = kind === 'comic' ? await A.comicJob(state, story, cut, io) : await A.storyJob(state, story, cut, io);
     // A comic's panels and pictures already went over in the progress reports; only the seed and the characters' body tags are left.

@@ -600,7 +600,7 @@ async function makeComic(story, replan) {
   ui.drawing = story.id; ui.comic = true; ui.status = ''; render();
   story.comicCut = story.comicCut || { replan: plan }; // saved when the app is hidden, cleared when done
   const io = { signal: j.signal, step: j.step, save, json: (m) => chatJson(m, { signal: j.signal }),
-    draw: (prompt, onWait, opts) => A.drawPicture(state.settings, prompt, onWait, opts, PIC_ENV), landed: () => { if (here()) render(); } };
+    draw: (prompt, onWait, opts) => A.drawPicture(state.settings, prompt, onWait, opts, PIC_ENV), models: comfyModels, landed: () => { if (here()) render(); } };
   try {
     const left = story.comicCut.helper || await helperUp('comic') ? await onHelperComic(story, io) : null;
     ui.status = left === null ? await A.comicJob(state, story, story.comicCut, io) : left; // no helper, or it lost the job: draw here
@@ -616,7 +616,7 @@ async function makeComic(story, replan) {
 }
 // Developer view (Settings → Pictures): what each panel was planned as, the exact prompt sent, which model drew it, and its check.
 const panelDev = (p) => state.settings.devPrompts && h('details', { class: 'dev' }, h('summary', {}, 'Prompt'),
-  p.sent && p.sent.prompt ? h('p', {}, h('b', {}, `Sent to ${p.sent.by} (${p.sent.model}): `), p.sent.prompt) : h('p', {}, h('b', {}, 'Prompt: '), p.prompt),
+  p.sent && p.sent.prompt ? h('p', {}, h('b', {}, `Sent to ${p.sent.by} (${p.sent.model}${p.sent.why ? ', picked for an ' + p.sent.why : ''}): `), p.sent.prompt) : h('p', {}, h('b', {}, 'Prompt: '), p.prompt),
   p.check && h('p', {}, h('b', {}, 'Picture check: '), p.check),
   p.scene && h('p', {}, h('b', {}, 'Plan: '), JSON.stringify({ quote: p.quote, setting: p.setting, characters: p.characters, clothes: p.clothes, explicit: p.explicit })));
 const comicView = (story) => h('div', { class: 'comic' }, story.panels.map((p, i) => h('figure', {},
@@ -1138,7 +1138,7 @@ function pictureSettings(bind) {
     h('option', { value: s.comfyModel }, s.comfyModel || 'Tap Test to list your models'));
   // Explicit comic panels can use a different checkpoint (tame models draw them PG-13); the fixed body tags keep the characters the same.
   const nsfwModels = h('select', { onchange: (e) => { s.comfyNsfwModel = e.target.value; save(); } },
-    h('option', { value: s.comfyNsfwModel }, s.comfyNsfwModel || 'Same as Model'));
+    h('option', { value: s.comfyNsfwModel }, s.comfyNsfwModel || 'Automatic: picked from the scene'));
   const tick = (key, text) => h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s[key], onchange: (e) => { s[key] = e.target.checked; save(); }, style: 'width:auto' }), ' ' + text);
   const msg = h('div', { class: 'status' });
   const testComfy = async () => {
@@ -1150,7 +1150,7 @@ function pictureSettings(bind) {
       if (!list.includes(s.comfyModel)) { s.comfyModel = list[0]; save(); }
       models.replaceChildren(...list.map((m) => h('option', { value: m, selected: m === s.comfyModel }, m)));
       if (s.comfyNsfwModel && !list.includes(s.comfyNsfwModel)) { s.comfyNsfwModel = ''; save(); }
-      nsfwModels.replaceChildren(h('option', { value: '' }, 'Same as Model'), ...list.map((m) => h('option', { value: m, selected: m === s.comfyNsfwModel }, m)));
+      nsfwModels.replaceChildren(h('option', { value: '' }, 'Automatic: picked from the scene'), ...list.map((m) => h('option', { value: m, selected: m === s.comfyNsfwModel }, m)));
       msg.textContent = `✓ Connected. Pictures will be drawn on your PC with ${s.comfyModel}.`;
     } catch (e) { msg.textContent = comfyError(e) + ' See Help & guides → Problems and fixes.'; }
   };
@@ -1168,6 +1168,7 @@ function pictureSettings(bind) {
     ...field('ComfyUI address', bind('comfyUrl', h('input', { type: 'url', autocomplete: 'off', placeholder: 'http://127.0.0.1:8189' }))),
     ...field('Model', models),
     ...field('Model for explicit comic panels', nsfwModels),
+    h('p', { class: 'muted' }, 'Comics pick the model for each panel from its scene: explicit panels go to a model that can draw them (NoobAI, Pony, Illustrious, WAI or a name with NSFW in it) unless you pick one here, everything else to your Model above.'),
     h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: testComfy }, 'Test')), msg,
     h('h3', {}, 'Comic accuracy'),
     tick('checkPictures', 'Check each comic panel: your story AI looks at it and redraws it once if it doesn\'t match the story (slower; needs an AI that can see pictures, like the default)'),

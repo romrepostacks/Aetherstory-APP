@@ -366,8 +366,8 @@ test('comic panels swap names for written appearance in the image prompt', () =>
   ] });
   assert.strictEqual(panels.length, 1);
   assert.match(panels[0].prompt, /anime manhwa/);
-  assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side, clothed\. Ana on a rainy pier/);
-  assert.match(panels[0].prompt, /\(tall, red braid, green coat\) and \(a man\)/);
+  // people right after the counts, each with their own head tag; names in the scene become looks
+  assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side, clothed\. \(1girl, tall, red braid, green coat\) and \(1boy, a man\)\. the girl on a rainy pier/);
   assert.doesNotMatch(panels[0].prompt, /Ana:/);
   assert.deepStrictEqual(panels[0].dialogue, [{ name: 'Ana', line: 'Wait.' }]);
   assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /- Ana: tall, red braid/);
@@ -383,7 +383,7 @@ test('comic panels keep story order, fixed body tags, scene clothes, and are exp
     { quote: 'Under the RAIN', scene: 'rain close-up', characters: [] },
   ] }, part);
   assert.deepStrictEqual(panels.map((p) => p.scene), ['Ana at her desk', 'kiss on pier', 'rain close-up']);
-  assert.match(panels[0].prompt, /^1girl, sitting, typing, clothed\. Ana at her desk\. office\. \(1girl, adult, muscular, tall, red braid, wearing white blouse\)/);
+  assert.match(panels[0].prompt, /^1girl, sitting, typing, clothed\. \(1girl, adult, muscular, tall, red braid, wearing white blouse\)\. the red braid girl at her desk\. office\./);
   assert.strictEqual(panels[1].explicit, true);
   assert.doesNotMatch(panels[1].prompt, /clothed/);
   assert.match(panels[2].prompt, /^no humans/);
@@ -525,4 +525,13 @@ test('comicJob plans, draws each panel through io and keeps panels already drawn
   await A.comicJob(s, story, { replan: false }, io);
   assert.equal(drawn.length, 1);
   assert.equal(story.panels[0].img, 'kept');
+});
+
+test('pickModel sends explicit panels to a model that can draw them and the rest to the everyday one', () => {
+  const models = ['animagine-xl-4.0.safetensors', 'noobai-XL-1.1.safetensors'];
+  assert.deepEqual(A.pickModel({}, models, true), { model: 'noobai-XL-1.1.safetensors', why: 'explicit scene' });
+  assert.equal(A.pickModel({}, models, false).model, 'animagine-xl-4.0.safetensors');
+  assert.equal(A.pickModel({ comfyNsfwModel: 'mine.safetensors' }, models, true).model, 'mine.safetensors');
+  assert.equal(A.pickModel({ comfyModel: 'animagine-xl-4.0.safetensors' }, ['animagine-xl-4.0.safetensors'], true).model, 'animagine-xl-4.0.safetensors');
+  assert.equal(A.pickModel({}, [], false), null);
 });
