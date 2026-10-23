@@ -385,7 +385,7 @@ async function helperJob(kind, story, cut, io, each, query = () => '') {
   io.signal.addEventListener('abort', drop, { once: true }); // Cancel stops the laptop too
   for (;;) {
     await pause(1500, io.signal);
-    const res = await fetchBack(`${base}/jobs/${cut.helper}${query()}`, { headers, signal: io.signal }).catch((e) => { if (io.signal.aborted) throw e; });
+    const res = await fetchBack(`${base}/jobs/${cut.helper}${query()}`, { headers, signal: io.signal, cache: 'no-store' }).catch((e) => { if (io.signal.aborted) throw e; });
     if (!res || res.status === 404) { delete cut.helper; return null; }
     const r = await res.json();
     if (r.cut) Object.assign(cut, r.cut, { helper: cut.helper }); else if (r.stage) cut.stage = r.stage; // older helpers only sent the stage
@@ -603,7 +603,7 @@ async function makeComic(story, replan) {
   const here = () => ui.view === 'stories' && ui.param === story.id;
   ui.drawing = story.id; ui.comic = true; ui.status = ''; render();
   story.comicCut = story.comicCut || { replan: plan }; // saved when the app is hidden, cleared when done
-  const io = { signal: j.signal, step: j.step, save, json: (m) => chatJson(m, { signal: j.signal }),
+  const io = { signal: j.signal, step: j.step, note: j.note, save, json: (m) => chatJson(m, { signal: j.signal }),
     draw: (prompt, onWait, opts) => A.drawPicture(state.settings, prompt, onWait, opts, PIC_ENV), models: comfyModels, landed: () => { if (here()) render(); } };
   try {
     const left = story.comicCut.helper || await helperUp('comic') ? await onHelperComic(story, io) : null;
