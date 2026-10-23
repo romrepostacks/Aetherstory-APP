@@ -86,7 +86,11 @@ function chatOnce(messages, { use, ...opts } = {}) {
 }
 
 async function chatJson(messages, opts) {
-  return A.parseJsonLoose(await chat(messages, { stream: false, ...opts }));
+  // A broken reply gets one fresh try; models rarely make the same slip twice.
+  try { return A.parseJsonLoose(await chat(messages, { stream: false, ...opts })); } catch (e) {
+    if (e instanceof SyntaxError || /No JSON/.test(e.message)) return A.parseJsonLoose(await chat(messages, { stream: false, ...opts }));
+    throw e;
+  }
 }
 // Photos can go to a separate free vision AI (Google Gemini by default) when its key is set; otherwise the main AI reads them.
 // Gemini's free tier may keep what it's sent, so Private mode keeps photos on the main AI.
@@ -381,7 +385,7 @@ async function helperJob(kind, story, cut, io, each, query = () => '') {
   io.signal.addEventListener('abort', drop, { once: true }); // Cancel stops the laptop too
   for (;;) {
     await pause(1500, io.signal);
-    const res = await fetchBack(`${base}/jobs/${cut.helper}${query()}`, { headers, signal: io.signal }).catch((e) => { if (io.signal.aborted) throw e; });
+    const res = await fetchBack(`${base}/jobs/${cut.helper}${query()}`, { headers, signal: io.signal, cache: 'no-store' }).catch((e) => { if (io.signal.aborted) throw e; });
     if (!res || res.status === 404) { delete cut.helper; return null; }
     const r = await res.json();
     if (r.cut) Object.assign(cut, r.cut, { helper: cut.helper }); else if (r.stage) cut.stage = r.stage; // older helpers only sent the stage
@@ -422,7 +426,7 @@ async function onHelperComic(story, io) {
 }
 const dataBlob = (url) => { const [head, b64] = url.split(','); return new Blob([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], { type: head.slice(5).split(';')[0] }); };
 // Notifications: the helper pings Apple's or Google's push service with an empty message (no story text in it),
-// and sw.js shows a fixed "your story is ready".
+// and sw.js shows a fixed "your story or comic has finished".
 async function helperPair(msg) {
   const s = state.settings;
   msg.textContent = 'Connecting…';
@@ -599,7 +603,7 @@ async function makeComic(story, replan) {
   const here = () => ui.view === 'stories' && ui.param === story.id;
   ui.drawing = story.id; ui.comic = true; ui.status = ''; render();
   story.comicCut = story.comicCut || { replan: plan }; // saved when the app is hidden, cleared when done
-  const io = { signal: j.signal, step: j.step, save, json: (m) => chatJson(m, { signal: j.signal }),
+  const io = { signal: j.signal, step: j.step, note: j.note, save, json: (m) => chatJson(m, { signal: j.signal }),
     draw: (prompt, onWait, opts) => A.drawPicture(state.settings, prompt, onWait, opts, PIC_ENV), models: comfyModels, landed: () => { if (here()) render(); } };
   try {
     const left = story.comicCut.helper || await helperUp('comic') ? await onHelperComic(story, io) : null;

@@ -381,7 +381,26 @@
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
     if (start < 0 || end <= start) throw new Error('No JSON object in model reply');
-    return JSON.parse(text.slice(start, end + 1));
+    const raw = text.slice(start, end + 1);
+    try { return JSON.parse(raw); } catch (e) {
+      try { return JSON.parse(repairJson(raw)); } catch (e2) { throw e; }
+    }
+  }
+  // The usual slips in long replies: "quotes" inside dialogue left unescaped, raw line breaks in strings, trailing commas.
+  // A quote counts as closing a string only when what follows could come after a JSON value.
+  function repairJson(raw) {
+    let out = '', inStr = false;
+    for (let i = 0; i < raw.length; i++) {
+      const c = raw[i];
+      if (inStr && c === '\\') { out += c + (raw[++i] || ''); continue; }
+      if (c === '"') {
+        if (!inStr) inStr = true;
+        else if (/^\s*([,:}\]]|$)/.test(raw.slice(i + 1, i + 20))) inStr = false;
+        else { out += '\\"'; continue; }
+      } else if (inStr && c === '\n') { out += '\\n'; continue; }
+      out += c;
+    }
+    return out.replace(/,(\s*[}\]])/g, '$1');
   }
 
   const strList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim()) : []);
