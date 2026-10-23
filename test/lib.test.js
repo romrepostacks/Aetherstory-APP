@@ -499,3 +499,30 @@ test('storyJob writes, checks and updates the world through io, and helperState 
   assert.equal(s.characters[0].portrait, 'data:image/jpeg;base64,xx'); // pictures the helper never saw stay
   assert.equal(s.world.ai.apiKey, 'world-key');
 });
+
+test('comicJob plans, draws each panel through io and keeps panels already drawn', async () => {
+  const s = seeded();
+  s.settings.checkPictures = true;
+  s.characters[0].appearance = 'Tall with red hair.';
+  const story = { id: 'c', title: 'T', characterIds: ['a'], text: 'Mira walked to the harbor. The gulls screamed her name.', panels: [] };
+  const drawn = [];
+  const io = { step: () => {}, save: async () => {}, landed: () => {},
+    json: async (m) => {
+      const t = typeof m[0].content === 'string' ? m[0].content : '';
+      if (/character tags/.test(t)) return { looks: { Mira: 'tall, red hair' } };
+      if (/manhwa/.test(t)) return { panels: [{ quote: 'Mira walked', scene: 'Mira walks', characters: ['Mira'] }, { quote: 'gulls screamed', scene: 'gulls scream', characters: [] }] };
+      if (/comic editor/.test(t)) return { order: [], fixes: [] };
+      return { ok: true };
+    },
+    draw: async (prompt, onWait, opts) => { drawn.push(prompt); opts.onNote(''); return { img: 'data:image/png;base64,AA', sent: { by: 'ComfyUI', model: 'm', prompt } }; } };
+  const cut = { replan: false };
+  assert.equal(await A.comicJob(s, story, cut, io), 'Comic ready.');
+  assert.equal(story.panels.length, 2);
+  assert.ok(story.panels.every((p) => p.img && p.check === 'Checked: matches the story.'));
+  assert.equal(s.characters[0].lookTags, 'tall, red hair');
+  // Draw missing panels: only the cleared one is drawn again, the helper's 'kept' marker counts as drawn
+  story.panels[0].img = 'kept'; story.panels[1].img = ''; drawn.length = 0;
+  await A.comicJob(s, story, { replan: false }, io);
+  assert.equal(drawn.length, 1);
+  assert.equal(story.panels[0].img, 'kept');
+});
