@@ -394,6 +394,7 @@
   // A quote counts as closing a string only when what follows could come after a JSON value.
   function repairJson(raw) {
     let out = '', inStr = false;
+    const open = []; // the brackets still open outside strings, to drop a stray closer or add a missing one
     for (let i = 0; i < raw.length; i++) {
       const c = raw[i];
       if (inStr && c === '\\') { out += c + (raw[++i] || ''); continue; }
@@ -404,9 +405,20 @@
         else if (/^\s*([,:}\]]|$)/.test(raw.slice(i + 1, i + 20))) inStr = false;
         else { out += '\\"'; continue; }
       } else if (inStr && c === '\n') { out += '\\n'; continue; }
+      else if (!inStr && (c === '{' || c === '[')) open.push(c === '{' ? '}' : ']');
+      else if (!inStr && (c === '}' || c === ']')) {
+        // One closer too many ({"a": "x"}}, "b": ...): what follows is still a key, so the object isn't over.
+        const extra = c !== open[open.length - 1] || (open[open.length - 2] === ']' && /^\s*,\s*"[^"]*"\s*:/.test(raw.slice(i + 1, i + 60)));
+        if (extra) {
+          const deeper = open.lastIndexOf(c);
+          if (c === open[open.length - 1] || deeper < 0) continue; // drop the stray closer
+          out += open.splice(deeper + 1).reverse().join(''); // a closer went missing before this one: add it
+        }
+        open.pop();
+      }
       out += c;
     }
-    return out.replace(/,(\s*[}\]])/g, '$1');
+    return (out + open.reverse().join('')).replace(/,(\s*[}\]])/g, '$1');
   }
 
   const strList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim()) : []);

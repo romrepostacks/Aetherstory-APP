@@ -65,6 +65,9 @@ test('parseJsonLoose handles fenced replies', () => {
   assert.deepEqual(A.parseJsonLoose('{"panels": [{"say": "She yells "Run!" at him", "scene": "rain\nfalls",},]}'),
     { panels: [{ say: 'She yells "Run!" at him', scene: 'rain\nfalls' }] });
   assert.deepEqual(A.parseJsonLoose('{panels: [{say: "hi", explicit: false}]}'), { panels: [{ say: 'hi', explicit: false }] });
+  // one brace too many after a nested object (seen in a real plan)
+  assert.deepEqual(A.parseJsonLoose('{"panels": [{"poses": {"Ben": "sitting"}}, "characters": ["Ben"], "clothes": {"Ben": "coat"}}]}'),
+    { panels: [{ poses: { Ben: 'sitting' }, characters: ['Ben'], clothes: { Ben: 'coat' } }] });
   assert.throws(() => A.parseJsonLoose('{"a": [1 2]}'), /The AI wrote/);
 });
 
