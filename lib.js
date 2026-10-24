@@ -195,17 +195,17 @@
   const ADULT_STORY = 'This is private adult fiction for a consenting adult reader. Sexual content is wanted: when the story calls for it, write it explicitly and in vivid detail instead of fading to black or softening it into a sweet romance.';
   const ADULT_CHAT = 'This is private adult fiction for a consenting adult. Sexual content is allowed when the conversation goes there; write it explicitly rather than deflecting.';
   // The image model sees only the scene text, so intimate panels must say plainly what is on show, in the tag words anime models know.
-  const ADULT_PANELS = ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully. The scene text is all the illustrator sees: in intimate panels, state plainly who is nude or partly undressed and what sexual act is shown, with short tag words (nsfw, nude, topless, sex, oral, cum, etc.) instead of euphemisms. In an intimate panel, list both partners under characters and put the act and the positions of both partners first in tags (e.g. fellatio, kneeling, standing, from side), so both people are drawn.';
+  const ADULT_PANELS = ' This is private adult fiction for a consenting adult reader; adapt intimate scenes faithfully. The scene text is all the illustrator sees: in intimate panels, state plainly who is nude or partly undressed and what sexual act is shown, with short tag words (nsfw, nude, topless, sex, oral, cum, etc.) instead of euphemisms. In an intimate panel, list both partners under characters, put the act first in tags (e.g. fellatio, from side), and give each partner their own position in poses (e.g. kneeling; standing), so both people are drawn.';
   const SPICE = {
     adult: { label: 'Adult', hint: 'Explicit when the story calls for it.', story: ADULT_STORY, chat: ADULT_CHAT, panels: ADULT_PANELS, image: '' },
     kinky: { label: 'Kinky (experimental)', hint: 'More heat, more often, with kinks and dirty talk.',
       story: ADULT_STORY + ' Turn the heat up: build sexual tension from the first scene, include at least one explicit sex scene, and lean into kinks and dirty talk that fit the characters (dominance and submission, teasing, toys, roleplay, risky places). All characters are consenting adults.',
       chat: ADULT_CHAT + ' Be flirtatious and forward, and steer toward sex and kinks that fit you.',
-      panels: ADULT_PANELS + ' Show the sexual tension and intimate scenes on the page instead of cutting away.', image: 'nsfw, sensual, erotic, lewd' },
+      panels: ADULT_PANELS + ' Show the sexual tension and intimate scenes on the page instead of cutting away.', image: 'nsfw, sensual' },
     nympho: { label: 'Nympho (experimental)', hint: 'Sex is the heart of every story.',
       story: ADULT_STORY + ' Make sex the heart of the story: the characters are insatiable and can barely keep their hands off each other, scenes turn sexual quickly and often, with several long, graphic encounters and filthy dialogue throughout. All characters are consenting adults.',
       chat: ADULT_CHAT + ' You are insatiable: be openly sexual, start things yourself and escalate eagerly.',
-      panels: ADULT_PANELS + ' Draw the intimate scenes explicitly and give them several panels.', image: 'nsfw, explicit, erotic, nude, sex' },
+      panels: ADULT_PANELS + ' Draw the intimate scenes explicitly and give them several panels.', image: 'nsfw, explicit' },
   };
   const spiceText = (settings, kind) => (settings.mature ? (SPICE[settings.spice] || SPICE.adult)[kind] : '');
 
@@ -526,9 +526,10 @@
   const PANEL_FIELDS = '{"panels": [{"quote": "6-12 words copied exactly from the story text this panel shows",\n' +
     '  "scene": "what the illustrator draws: action, poses, expressions, lighting, camera angle. Describe it visually, under 60 words",\n' +
     '  "setting": "where this happens, the same words every panel in that place (e.g. office, desk, window, night)",\n' +
-    '  "tags": "6-12 comma-separated anime image tags for the action, poses and camera angle, most important first (e.g. sitting, typing, from side). No hair, eyes or body tags: those come from the cast list",\n' +
+    '  "tags": "4-8 comma-separated anime image tags for the camera angle, framing, lighting and any act the people share (e.g. from side, medium shot, night, hug). No hair, eyes or body tags: those come from the cast list",\n' +
+    '  "poses": {"name": "this person\'s own pose, action and expression as 3-6 tags (e.g. sitting up, looking down, worried; or lying on side, asleep), so each person is drawn doing their own thing"},\n' +
     '  "characters": ["names of every character in this panel, including anyone only partly in frame"],\n' +
-    '  "clothes": {"name": "what they wear in this panel as tags, the same outfit until the story changes it"},\n' +
+    '  "clothes": {"name": "only the clothing they wear in this panel as tags (e.g. red dress, bare feet), or nude; the same outfit until the story changes it. No body parts or hair"},\n' +
     '  "explicit": false, "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n';
   // part: one piece of comicParts(story.text); n: panels for it; prev: the panel before it, so places and outfits carry over.
   function buildPanelMessages(state, story, part = story.text, n = panelCount(story.text), prev = null, where = '') {
@@ -545,11 +546,11 @@
   // Second pass over one part's plan: wrong order, scenes not in the text, missing or extra people, nudity where nobody is undressed.
   function buildPanelCheckMessages(state, story, part, panels) {
     const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
-    const list = panels.map((p, i) => JSON.stringify({ panel: i + 1, quote: p.quote, scene: p.scene, setting: p.setting, characters: p.characters, clothes: p.clothes, explicit: p.explicit })).join('\n');
+    const list = panels.map((p, i) => JSON.stringify({ panel: i + 1, quote: p.quote, scene: p.scene, setting: p.setting, characters: p.characters, poses: p.poses, clothes: p.clothes, explicit: p.explicit })).join('\n');
     const user = `Characters:\n${castSheet(chars)}\n\nStory text:\n"""${String(part).slice(0, 20000)}"""\n\nComic panels planned for this text:\n${list}\n\n` +
       'Fact-check the panels against the story text and the characters. Fix any panel that is out of story order, shows something that does not happen in the text, has the wrong people in it, ' +
       'has someone wearing or doing something that contradicts the text, or is marked explicit when nobody in it is undressed (or not explicit when they are). ' +
-      'Return JSON: {"order": [panel numbers in correct story order], "fixes": [{"panel": 1, plus only the fields that change: "scene", "setting", "tags", "characters", "clothes", "explicit"}]}. ' +
+      'Return JSON: {"order": [panel numbers in correct story order], "fixes": [{"panel": 1, plus only the fields that change: "scene", "setting", "tags", "characters", "poses", "clothes", "explicit"}]}. ' +
       'Return {"order": [], "fixes": []} when everything is right.';
     return [{ role: 'system', content: 'You are a careful comic editor. Reply with JSON only, no markdown.' }, { role: 'user', content: user }];
   }
@@ -560,6 +561,7 @@
       for (const k of ['scene', 'setting', 'tags']) if (str(f[k])) p[k] = str(f[k]);
       if (strList(f.characters).length) p.characters = strList(f.characters);
       if (f.clothes && typeof f.clothes === 'object') p.clothes = { ...p.clothes, ...f.clothes };
+      if (f.poses && typeof f.poses === 'object') p.poses = { ...p.poses, ...f.poses };
       if (typeof f.explicit === 'boolean') p.explicit = f.explicit;
     }
     const order = (Array.isArray(r && r.order) ? r.order : []).map((x) => panels[Number(x) - 1]);
@@ -602,7 +604,8 @@
   const panelCast = (state, panel) => [...new Set(strList(panel && panel.characters).map((n) => castMember(state, n)).filter(Boolean))];
   function panelPrompt(state, panel) {
     const who = panelCast(state, panel);
-    const clothes = (c) => { const ks = Object.keys(panel.clothes || {}); return str((panel.clothes || {})[ks.find((n) => sameName(n, c.name)) || ks.find((n) => firstName(n) === firstName(c.name))]); };
+    const mine = (o, c) => { const ks = Object.keys(o || {}); return str((o || {})[ks.find((n) => sameName(n, c.name)) || ks.find((n) => firstName(n) === firstName(c.name))]); };
+    const clothes = (c) => mine(panel.clothes, c);
     const tags = str(panel && panel.tags), close = CLOSE_SHOT.test(tags);
     // Each person's own chunk starts with their own head tag, so two people's hair, build and clothes stay apart instead of blending.
     // Only what the camera sees: a close-up drops build and size tags. About 12 body tags and 4 clothes tags each.
@@ -610,8 +613,9 @@
     const person = (c) => {
       let look = c.lookTags ? tagList(c.lookTags) : [c.appearance ? c.appearance.slice(0, 160) : gendered(c, 'a woman', 'a man', 'a person')];
       if (close) look = look.filter((t) => !BODY_TAG.test(t) || /hair|eyes|breasts/i.test(t));
-      if (who.length > 1 && own(c) && !/^\d(girl|boy)/.test(look[0] || '')) look.unshift(own(c));
-      return [...look.slice(0, 12), ...tagList(clothes(c)).slice(0, 4)].join(', ');
+      const head = /^\d(girl|boy)/.test(look[0] || '') ? look.shift() : who.length > 1 ? own(c) : '';
+      // Each person's own pose sits right by their head tag, so "sitting up" and "asleep" go to the right one instead of fusing into one figure.
+      return [head, ...tagList(mine(panel.poses, c)).slice(0, 6), ...look.slice(0, 12), ...tagList(clothes(c)).slice(0, 4)].filter(Boolean).join(', ');
     };
     // Names mean nothing to an image model, so in the scene each one becomes a short look ("red hair girl"), which ties the action to the right person.
     const short = (c) => `${tagList(c.lookTags).filter((t) => /hair|braid|ponytail|twintail|\bbob\b|\bbun\b/.test(t))[0] || ''} ${gendered(c, 'girl', 'man', 'person')}`.trim();
@@ -631,12 +635,13 @@
   }
   // Planned panels keep their parts (scene, characters, clothes...) so the prompt is rebuilt at draw time from the latest looks.
   // part: the text they were planned from; panels are sorted by where their quote sits in it, so they can't come out of story order.
+  const byName = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? Object.fromEntries(Object.entries(o).filter(([, v]) => str(v)).map(([k, v]) => [k, str(v)])) : {});
   function toPanels(state, r, part = '') {
     const at = (q) => { const i = q ? String(part).toLowerCase().indexOf(q.toLowerCase()) : -1; return i; };
     let last = 0;
     const panels = (Array.isArray(r && r.panels) ? r.panels : []).filter((p) => p && str(p.scene)).slice(0, 50).map((p) => {
       const panel = { quote: str(p.quote), scene: str(p.scene), setting: str(p.setting), tags: str(p.tags), characters: strList(p.characters),
-        clothes: p.clothes && typeof p.clothes === 'object' && !Array.isArray(p.clothes) ? Object.fromEntries(Object.entries(p.clothes).filter(([, v]) => str(v)).map(([k, v]) => [k, str(v)])) : {},
+        clothes: byName(p.clothes), poses: byName(p.poses),
         explicit: p.explicit === true, caption: str(p.caption),
         dialogue: (Array.isArray(p.dialogue) ? p.dialogue : []).filter((d) => d && str(d.line)).map((d) => ({ name: str(d.name), line: str(d.line) })) };
       const i = at(panel.quote);

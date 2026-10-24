@@ -560,3 +560,11 @@ test('panels that shorten names to first names still get each person\'s looks', 
   assert.strictEqual(A.panelPrompt(s, { scene: 'Ana kisses Ben', characters: ['Ana', 'ben', 'Ana Reyes'], clothes: { Ana: 'dress' }, tags: 'kiss' }),
     '1girl, 1boy, kiss BREAK 1girl, red hair, dress BREAK 1boy, black hair BREAK the red hair girl kisses the black hair man BREAK manhwa, webtoon, anime coloring, cel shading, clean lineart, detailed background');
 });
+
+test('each person\'s own pose goes in their own chunk, right after their head tag', () => {
+  const s = A.emptyState();
+  s.characters.push({ id: 'a', name: 'Ana Reyes', appearance: 'She', lookTags: '1girl, red hair' }, { id: 'b', name: 'Ben Okafor', appearance: 'He', lookTags: '1boy, black hair' });
+  const [p] = A.toPanels(s, { panels: [{ scene: 'Ben sits up, Ana asleep', tags: 'from side', characters: ['Ben Okafor', 'Ana Reyes'], poses: { Ben: 'sitting up, awake', 'Ana Reyes': 'lying on side, asleep' }, clothes: { Ana: 'red dress' } }] });
+  assert.match(p.prompt, /BREAK 1boy, sitting up, awake, black hair BREAK 1girl, lying on side, asleep, red hair, red dress BREAK/);
+  assert.deepStrictEqual(A.applyPanelCheck([p], { fixes: [{ panel: 1, poses: { Ben: 'standing' } }] })[0].poses.Ben, 'standing');
+});
