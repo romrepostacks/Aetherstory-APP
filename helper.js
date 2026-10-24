@@ -84,7 +84,7 @@ async function run(job, { kind = 'story', state, storyId, cut, push }) {
         throw e;
       }
     },
-    draw: (prompt, onWait, opts) => A.drawPicture(s, prompt, onWait, opts, PIC_ENV), models: () => A.comfyModels(s, PIC_ENV),
+    draw: (prompt, onWait, opts) => A.drawPicture(s, prompt, onWait, opts, PIC_ENV), models: () => A.comfyModels(s, PIC_ENV), refs: () => A.comfyRefs(s, PIC_ENV),
     landed: (p) => { if (p) job.imgs.push({ i: story.panels.indexOf(p), img: p.img }); job.story = story; } };
   job.imgs = []; job.story = story;
   // The phone's ComfyUI address is usually this PC's own Tailscale https name, which a PC can't always reach from itself.

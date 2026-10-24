@@ -540,7 +540,7 @@
     '  "setting": "where this happens, the same words every panel in that place (e.g. office, desk, window, night)",\n' +
     '  "tags": "4-8 comma-separated anime image tags for the camera angle, framing, lighting and any act the people share (e.g. from side, medium shot, night, hug). No hair, eyes or body tags: those come from the cast list",\n' +
     '  "poses": {"name": "this person\'s own pose, action and expression as 3-6 tags (e.g. sitting up, looking down, worried; or lying on side, asleep), so each person is drawn doing their own thing"},\n' +
-    '  "characters": ["names of every character in this panel, including anyone only partly in frame"],\n' +
+    '  "characters": ["names of every character physically in this panel, including anyone only partly in frame; not someone only seen on a screen or photo, heard, or thought about (put that in scene, e.g. phone screen showing a woman)"],\n' +
     '  "clothes": {"name": "only the clothing they wear in this panel as tags (e.g. red dress, bare feet), or nude; the same outfit until the story changes it. No body parts or hair"},\n' +
     '  "explicit": false, "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n';
   // part: one piece of comicParts(story.text); n: panels for it; prev: the panel before it, so places and outfits carry over.
@@ -560,7 +560,7 @@
     const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
     const list = panels.map((p, i) => JSON.stringify({ panel: i + 1, quote: p.quote, scene: p.scene, setting: p.setting, characters: p.characters, poses: p.poses, clothes: p.clothes, explicit: p.explicit })).join('\n');
     const user = `Characters:\n${castSheet(chars)}\n\nStory text:\n"""${String(part).slice(0, 20000)}"""\n\nComic panels planned for this text:\n${list}\n\n` +
-      'Fact-check the panels against the story text and the characters. Fix any panel that is out of story order, shows something that does not happen in the text, has the wrong people in it, ' +
+      'Fact-check the panels against the story text and the characters. Fix any panel that is out of story order, shows something that does not happen in the text, has the wrong people in it (only people physically there count, not someone on a screen or in a photo), ' +
       'has someone wearing or doing something that contradicts the text, or is marked explicit when nobody in it is undressed (or not explicit when they are). ' +
       'Return JSON: {"order": [panel numbers in correct story order], "fixes": [{"panel": 1, plus only the fields that change: "scene", "setting", "tags", "characters", "poses", "clothes", "explicit"}]}. ' +
       'Return {"order": [], "fixes": []} when everything is right.';
@@ -645,6 +645,10 @@
   function portraitPrompt(c) {
     return [PORTRAIT_STYLE, str(c && c.appearance) || gendered(c, 'a woman', 'a man', 'a person'), 'fully clothed'].join('. ').slice(0, 1500);
   }
+  // A plain reference picture of one character, drawn once from their body tags on the PC. The PC's ComfyUI then copies that face and build
+  // into each panel (IPAdapter), which holds a character steadier than words can.
+  const REF_STYLE = 'solo, upper body, looking at viewer, simple background, white background, fully clothed, plain shirt';
+  const refPrompt = (c) => [REF_STYLE, c.lookTags || str(c.appearance).slice(0, 300) || gendered(c, '1girl', '1boy', '1person')].join(', ');
   // Planned panels keep their parts (scene, characters, clothes...) so the prompt is rebuilt at draw time from the latest looks.
   // part: the text they were planned from; panels are sorted by where their quote sits in it, so they can't come out of story order.
   const byName = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? Object.fromEntries(Object.entries(o).filter(([, v]) => str(v)).map(([k, v]) => [k, str(v)])) : {});
@@ -991,7 +995,13 @@
     if (ai.apiKey) settings.apiKey = ai.apiKey;
     if (ai.model) settings.model = ai.model;
     const stories = state.stories.map((x) => (x === story ? { ...x, panels: panels && x.panels ? x.panels.map((p) => ({ ...p, img: p.img ? 'kept' : '' })) : undefined } : { id: x.id, title: x.title, summary: x.summary, characterIds: x.characterIds, createdAt: x.createdAt, chat: x.chat }));
-    return JSON.parse(JSON.stringify({ settings, characters: state.characters, world: { ...state.world, ai: undefined }, stories }, noPictures));
+    const out = JSON.parse(JSON.stringify({ settings, characters: state.characters, world: { ...state.world, ai: undefined }, stories }, noPictures));
+    // A comic job also takes the cast's portraits and reference pictures, which the PC's ComfyUI copies faces from.
+    if (panels) for (const c of out.characters) {
+      const mine = state.characters.find((x) => x.id === c.id);
+      if ((story.characterIds || []).includes(c.id)) for (const k of ['portrait', 'ref']) if (mine[k]) c[k] = mine[k];
+    }
+    return out;
   }
   // Puts the helper's finished story, world and characters back. Fields the helper never had (pictures, keys) stay as they are.
   // ponytail: last write wins; a character edited on the phone while the laptop was writing gets the laptop's copy of the fields it returned.
@@ -1030,14 +1040,41 @@
     const opt = (await res.json()).CheckpointLoaderSimple.input.required.ckpt_name;
     return Array.isArray(opt[0]) ? opt[0] : (opt[1] && opt[1].options) || []; // older and newer ComfyUI list choices differently
   }
+  // Reference pictures need the IPAdapter add-on (ComfyUI_IPAdapter_plus) plus its two SDXL files; without them panels are drawn from words alone.
+  async function comfyRefs(s, env) {
+    const info = async (node) => (await (await env.fetch(`${comfyBase(s)}/object_info/${node}`, { signal: AbortSignal.timeout(15e3) })).json())[node];
+    const [loader, files, vision] = await Promise.all(['IPAdapterUnifiedLoader', 'IPAdapterModelLoader', 'CLIPVisionLoader'].map(info));
+    const list = (n, k) => JSON.stringify((n && n.input.required[k]) || []);
+    return !!loader && /plus.sdxl.vit.h/i.test(list(files, 'ipadapter_file')) && /ViT.H.14.*s32B.b79K/i.test(list(vision, 'clip_name'));
+  }
+  // Puts a reference picture in ComfyUI's input folder, named after its content so the same one is only stored once.
+  async function comfyUpload(s, dataUrl, env, signal) {
+    const blob = await (await env.fetch(dataUrl)).blob();
+    let h = 5381; for (let i = 0; i < dataUrl.length; i += 7) h = ((h * 33) ^ dataUrl.charCodeAt(i)) >>> 0;
+    const form = new FormData();
+    form.append('image', blob, `aetherstory-ref-${h.toString(36)}-${dataUrl.length.toString(36)}.${/png/.test(blob.type) ? 'png' : 'jpg'}`);
+    form.append('overwrite', 'true');
+    const res = await env.fetch(comfyBase(s) + '/upload/image', { method: 'POST', body: form, signal });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !j.name) throw new Error(`ComfyUI didn't take the reference picture (${res.status}).`);
+    return j.subfolder ? `${j.subfolder}/${j.name}` : j.name;
+  }
   // Returns { img, sent: { by, model, prompt } }. Explicit pictures carry the Spice level's tags; portraits (nsfw: false) never do.
   // model: a ComfyUI checkpoint for this picture (default: the one in Settings); seed: the same one across a comic keeps its look steadier.
   // onNote(text) hears why a picture went to Horde instead of the PC ('' when the PC drew it).
-  async function drawPicture(s, prompt, onWait, { width = 512, height = 768, nsfw = !!s.mature, signal, model, seed, onNote } = {}, env) {
+  // refs: one reference picture (or null) per person in the prompt, in the same order, for ComfyUI with IPAdapter.
+  async function drawPicture(s, prompt, onWait, { width = 512, height = 768, nsfw = !!s.mature, signal, model, seed, onNote, refs } = {}, env) {
     prompt = [nsfw && spiceText(s, 'image'), prompt].filter(Boolean).join(', '); // Spice tags first: image models weigh the start most
-    const opts = { width, height, nsfw, signal, model, seed };
+    const opts = { width, height, nsfw, signal, model, seed, refs };
     if (s.comfyUrl) {
-      try { const r = await drawComfy(s, prompt, onWait, opts, env); if (onNote) onNote(''); return r; } catch (e) {
+      try {
+        let r;
+        try { r = await drawComfy(s, prompt, onWait, opts, env); } catch (e) {
+          if ((signal && signal.aborted) || !(refs || []).some(Boolean) || e instanceof TypeError || /30 minutes/.test(e.message)) throw e;
+          r = await drawComfy(s, prompt, onWait, { ...opts, refs: null }, env); // the reference step broke: words alone beat AI Horde
+        }
+        if (onNote) onNote(''); return r;
+      } catch (e) {
         if (signal && signal.aborted) throw e; // cancelled, not broken: don't hand it to Horde
         const why = comfyError(s, e);
         if (s.privateOnly) throw new Error(why + ' Private mode is on, so AI Horde isn\'t used instead. See Settings → Help & guides.');
@@ -1046,7 +1083,7 @@
     } else if (s.privateOnly) throw new Error(PRIVATE_PICTURES);
     return drawHorde(s, prompt, onWait, opts, env);
   }
-  async function drawComfy(s, prompt, onWait, { width, height, nsfw, signal, model, seed }, env) {
+  async function drawComfy(s, prompt, onWait, { width, height, nsfw, signal, model, seed, refs }, env) {
     model = model || s.comfyModel || (await comfyModels(s, env))[0];
     if (!model) throw new Error('ComfyUI has no model yet. Put an anime model in ComfyUI\'s models\\checkpoints folder and restart it.');
     const k = Math.sqrt(1024 * 1024 / (width * height)), px = (x) => Math.round((x * k) / 64) * 64; // SDXL models draw best near one megapixel
@@ -1064,16 +1101,49 @@
     };
     // Each BREAK chunk is encoded on its own (nodes 100+) and joined in order (nodes 200+), so every chunk gets the model's full attention.
     prompt = `masterpiece, best quality, absurdres, ${prompt}`;
-    let positive;
-    prompt.split(/\s*\bBREAK\b\s*/).filter(Boolean).forEach((text, i) => {
-      workflow[100 + i] = { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text } };
-      positive = i ? (workflow[200 + i] = { class_type: 'ConditioningConcat', inputs: { conditioning_to: positive, conditioning_from: [String(100 + i), 0] } }, [String(200 + i), 0]) : ['100', 0];
-    });
-    workflow[5].inputs.positive = positive;
+    const chunks = prompt.split(/\s*\bBREAK\b\s*/).filter(Boolean);
+    chunks.forEach((text, i) => { workflow[100 + i] = { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text } }; });
+    const join = (ids, at) => ids.reduce((to, id, k) => (k ? (workflow[at + k] = { class_type: 'ConditioningConcat', inputs: { conditioning_to: to, conditioning_from: [String(100 + id), 0] } }, [String(at + k), 0]) : [String(100 + id), 0]), null);
+    // Two or more people (chunks that start with their own 1girl/1boy): words alone wash over the whole picture and the people blend,
+    // so each person's chunk is pinned to their own strip, side by side, overlapping a little (nodes 300+), on top of the shared chunks.
+    const people = chunks.map((t, i) => (i && /^\d(girl|boy)\b/.test(t) ? i : -1)).filter((i) => i > 0);
+    if (people.length < 2) workflow[5].inputs.positive = join(chunks.map((t, i) => i), 200);
+    else {
+      let positive = join(chunks.map((t, i) => i).filter((i) => !people.includes(i)), 200);
+      const W = px(width), H = px(height), w = Math.round((W * Math.min(1, 1.2 / people.length)) / 8) * 8;
+      people.forEach((id, k) => {
+        const n = 300 + k * 10;
+        workflow[n] = { class_type: 'ConditioningConcat', inputs: { conditioning_to: ['100', 0], conditioning_from: [String(100 + id), 0] } };
+        workflow[n + 1] = { class_type: 'ConditioningSetArea', inputs: { conditioning: [String(n), 0], width: w, height: H, x: Math.round((k * (W - w)) / (people.length - 1) / 8) * 8, y: 0, strength: 1 } };
+        workflow[n + 2] = { class_type: 'ConditioningCombine', inputs: { conditioning_1: positive, conditioning_2: [String(n + 1), 0] } };
+        positive = [String(n + 2), 0];
+      });
+      workflow[5].inputs.positive = positive;
+    }
+    // Reference pictures (IPAdapter): each person's picture steers only their own strip of the panel, or the whole panel when they're alone.
+    // They shape face, hair and build; the words still decide pose, clothes and scene, so the weight stays moderate.
+    const strips = people.length > 1 ? people : chunks.length > 1 && /^\d(girl|boy)\b/.test(chunks[1]) ? [1] : [];
+    if (refs && refs.length === strips.length && refs.some(Boolean)) {
+      const W = px(width), H = px(height), w = strips.length > 1 ? Math.round((W * Math.min(1, 1.2 / strips.length)) / 8) * 8 : W;
+      workflow[600] = { class_type: 'IPAdapterUnifiedLoader', inputs: { model: ['1', 0], preset: 'PLUS (high strength)' } };
+      let unet = ['600', 0];
+      for (const [k, ref] of refs.entries()) {
+        if (!ref) continue;
+        const n = 610 + k * 10, x = strips.length > 1 ? Math.round((k * (W - w)) / (strips.length - 1) / 8) * 8 : 0;
+        workflow[n] = { class_type: 'LoadImage', inputs: { image: await comfyUpload(s, ref, env, signal) } };
+        workflow[n + 1] = { class_type: 'SolidMask', inputs: { value: 0, width: W, height: H } };
+        workflow[n + 2] = { class_type: 'SolidMask', inputs: { value: 1, width: w, height: H } };
+        workflow[n + 3] = { class_type: 'MaskComposite', inputs: { destination: [String(n + 1), 0], source: [String(n + 2), 0], x, y: 0, operation: 'add' } };
+        workflow[n + 4] = { class_type: 'IPAdapterAdvanced', inputs: { model: unet, ipadapter: ['600', 1], image: [String(n), 0], weight: 0.6, weight_type: 'linear',
+          combine_embeds: 'concat', start_at: 0, end_at: 0.9, embeds_scaling: 'V only', attn_mask: [String(n + 3), 0] } };
+        unet = [String(n + 4), 0];
+      }
+      workflow[5].inputs.model = unet;
+    }
     const res = await env.fetch(comfyBase(s) + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }), signal });
     const job = await res.json().catch(() => ({}));
     if (!res.ok || !job.prompt_id) throw new Error(`ComfyUI refused the picture (${(job.error && job.error.message) || res.status}).`);
-    const sent = { by: 'ComfyUI', model, prompt };
+    const sent = { by: 'ComfyUI', model, prompt, ...(workflow[600] ? { refs: Object.values(workflow).filter((n) => n.class_type === 'IPAdapterAdvanced').length } : {}) };
     const started = Date.now();
     // ponytail: Cancel stops waiting but lets ComfyUI finish the one picture it's on (seconds); POST /interrupt if that ever matters.
     for (;;) {
@@ -1153,6 +1223,20 @@
     let done = 0, canCheck = s.checkPictures !== false, doing = '', checkNote = '', note = '';
     const models = s.comfyUrl && io.models ? await io.models().catch(() => []) : [];
     let model = '';
+    // With IPAdapter on the PC, each character's portrait from their sheet is their reference picture. Anyone without one gets
+    // a plain reference drawn first (once, redrawn when their body tags change).
+    const useRefs = !!(s.comfyUrl && io.refs && await io.refs().catch(() => false));
+    if (useRefs) {
+      const need = state.characters.filter((c) => (story.characterIds || []).includes(c.id) && !c.portrait && (!c.ref || c.refFrom !== (c.lookTags || c.appearance || '')));
+      for (const [i, c] of need.entries()) {
+        io.step(step, `Drawing a reference picture of ${c.name} (${i + 1} of ${need.length}), so every panel copies the same face and build.`);
+        try {
+          const pick = pickModel(s, models, false);
+          const r = await io.draw(refPrompt(c), null, { signal, nsfw: false, width: 512, height: 512, model: pick && pick.model, seed: story.seed, onNote: (n) => { note = n; } });
+          if (r.sent.by === 'ComfyUI') { c.ref = r.img; c.refFrom = c.lookTags || c.appearance || ''; await io.save(); }
+        } catch (e) { quiet(e); } // no reference: that character is drawn from words alone
+      }
+    }
     const progress = (c) => io.step(step, [`${done} of ${total} panels done${doing ? ', ' + doing : ''}. Drawing on ${artist(s, note)}${!note && model ? ` with ${model}` : ''}.`, waitText(c), note.trim(), checkNote,
       'Finished panels appear on the page as they land, so Hide lets you watch.'].filter(Boolean).join('\n'));
     // One at a time, in story order: the PC's ComfyUI and Horde work through them in turn anyway.
@@ -1163,7 +1247,8 @@
       const draw = async () => {
         doing = 'drawing the next'; progress();
         const r = await io.draw(p.scene ? panelPrompt(state, p) : p.prompt, progress,
-          { signal, nsfw: explicit, model: pick ? pick.model : (explicit && s.comfyNsfwModel) || undefined, seed: story.seed + (p.redraws || 0) * 7919, onNote: (n) => { note = n; } });
+          { signal, nsfw: explicit, model: pick ? pick.model : (explicit && s.comfyNsfwModel) || undefined, seed: story.seed + (p.redraws || 0) * 7919, onNote: (n) => { note = n; },
+            refs: useRefs && p.scene ? panelCast(state, p).map((c) => c.portrait || c.ref || null) : null });
         p.img = r.img; p.sent = { ...r.sent, ...(pick && r.sent.by === 'ComfyUI' ? { why: pick.why } : {}) }; p.check = '';
         await io.save(); io.landed(p);
       };
@@ -1249,7 +1334,7 @@
   const unseal = decryptWith;
 
   const api = { switchWorld, newWorld, deleteWorld, addToWorld, removeFromWorld, worldNames, exportCharacter, importCharacters, newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, trimRepeat, buildCheckMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, carryOn, ask, storyJob, helperState, applyHelperResult,
-    PRIVATE_PICTURES, fmtSecs, waitText, artist, comfyBase, comfyError, comfyModels, drawPicture, comicJob, pickModel, replyText, freeFallbacks, describeWorld, currentRelationships,
+    PRIVATE_PICTURES, fmtSecs, waitText, artist, comfyBase, comfyError, comfyModels, comfyRefs, refPrompt, panelCast, drawPicture, comicJob, pickModel, replyText, freeFallbacks, describeWorld, currentRelationships,
     SPICE, spiceText, memoryPlan, buildMemoryMessages, applyMemory, buildPanelMessages, panelCount, panelPrompt, portraitPrompt, toPanels,
     comicParts, buildPanelCheckMessages, applyPanelCheck, needsLook, buildLookMessages, applyLooks, buildPictureCheckMessages,
     buildReviseSheetMessages, buildReviseStoryMessages, buildChatMessages, chatText, buildPhotoMessages, speechChunks, speechParts, PREMIUM_VOICES, premiumVoices, premiumVoice, voiceRuns, characterGender, voiceGender, applyEdits, sheetChanges, charactersNamedIn, storiesForRevision, applyRevision, undoRevision };
