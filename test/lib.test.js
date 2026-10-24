@@ -584,3 +584,51 @@ test('two people are pinned to their own side of the picture in ComfyUI', async 
   assert.deepStrictEqual(wf[312].inputs.conditioning_1, ['302', 0]);
   assert.deepStrictEqual(wf[5].inputs.positive, ['312', 0]);
 });
+
+test('reference pictures steer each person\'s own strip through IPAdapter, and a failing reference step falls back to words', async () => {
+  let wf, uploads = 0, prompts = 0; const wfs = [];
+  const env = { fetch: async (url, o = {}) => {
+    if (url.startsWith('data:')) return fetch(url);
+    if (url.endsWith('/upload/image')) { uploads++; assert.ok(o.body instanceof FormData); return { ok: true, json: async () => ({ name: `r${uploads}.jpg`, subfolder: '' }) }; }
+    prompts++; wf = JSON.parse(o.body).prompt; wfs.push(wf);
+    if (wf[600] && prompts === 1 && url.includes('fail')) return { ok: false, status: 400, json: async () => ({ error: { message: 'no IPAdapter' } }) };
+    throw new Error('stop');
+  } };
+  const ref = 'data:image/jpeg;base64,AAAA';
+  await A.drawPicture({ comfyUrl: 'http://pc', comfyModel: 'm', privateOnly: true }, '1girl, 1boy, hug BREAK 1boy, black hair BREAK 1girl, red hair BREAK manhwa',
+    () => {}, { nsfw: false, width: 512, height: 768, refs: [ref, null] }, env).catch(() => {});
+  assert.strictEqual(uploads, 1);
+  wf = wfs[0];
+  assert.deepStrictEqual(wf[600].inputs, { model: ['1', 0], preset: 'PLUS (high strength)' });
+  assert.deepStrictEqual(wf[610].inputs, { image: 'r1.jpg' });
+  assert.deepStrictEqual([wf[613].inputs.x, wf[612].inputs.width], [0, 496]);
+  assert.deepStrictEqual(wf[614].inputs.attn_mask, ['613', 0]);
+  assert.deepStrictEqual(wf[5].inputs.model, ['614', 0]);
+  assert.strictEqual(wf[620], undefined); // the second person has no picture
+  assert.strictEqual(wfs[1][600], undefined); // the ComfyUI call failed, so it tried once more without references
+  // ComfyUI refuses the reference step: drawn again from words alone instead of going to AI Horde
+  prompts = 0;
+  await A.drawPicture({ comfyUrl: 'http://pc/fail', comfyModel: 'm', privateOnly: true }, '1girl, solo BREAK 1girl, red hair BREAK manhwa',
+    () => {}, { nsfw: false, refs: [ref] }, env).catch(() => {});
+  assert.strictEqual(prompts, 2);
+  assert.strictEqual(wf[600], undefined);
+  assert.deepStrictEqual(wf[5].inputs.model, ['1', 0]);
+});
+
+test('a comic draws a reference picture per character once, then hands them to each panel', async () => {
+  const s = A.emptyState();
+  Object.assign(s.settings, { comfyUrl: 'http://pc', checkPictures: false });
+  s.characters.push({ id: 'a', name: 'Ana', appearance: 'She', lookTags: '1girl, red hair', lookFrom: 'She' }, { id: 'b', name: 'Ben', appearance: 'He', lookTags: '1boy, black hair', lookFrom: 'He', ref: 'data:old', refFrom: '1boy, black hair' });
+  const story = { id: 's', text: 'x', characterIds: ['a', 'b'], panels: [{ scene: 'Ana hugs Ben', characters: ['Ana', 'Ben'] }] };
+  const calls = [];
+  const io = { step() {}, save: async () => {}, landed() {}, json: async () => ({}), models: async () => ['m'], refs: async () => true,
+    draw: async (prompt, onWait, opts) => { calls.push({ prompt, refs: opts.refs }); return { img: `data:new${calls.length}`, sent: { by: 'ComfyUI', model: 'm', prompt } }; } };
+  await A.comicJob(s, story, {}, io);
+  assert.strictEqual(calls.length, 2); // Ana's reference (Ben's is current), then the panel
+  assert.match(calls[0].prompt, /^solo, upper body.*1girl, red hair/);
+  assert.strictEqual(s.characters[0].ref, 'data:new1');
+  assert.deepStrictEqual(calls[1].refs, ['data:new1', 'data:old']);
+  // the helper gets the cast's references for a comic, not for a story
+  assert.strictEqual(A.helperState(s, story, { panels: true }).characters[0].ref, 'data:new1');
+  assert.strictEqual(A.helperState(s, story).characters[0].ref, undefined);
+});

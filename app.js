@@ -604,7 +604,7 @@ async function makeComic(story, replan) {
   ui.drawing = story.id; ui.comic = true; ui.status = ''; render();
   story.comicCut = story.comicCut || { replan: plan }; // saved when the app is hidden, cleared when done
   const io = { signal: j.signal, step: j.step, note: j.note, save, json: (m) => chatJson(m, { signal: j.signal }),
-    draw: (prompt, onWait, opts) => A.drawPicture(state.settings, prompt, onWait, opts, PIC_ENV), models: comfyModels, landed: () => { if (here()) render(); } };
+    draw: (prompt, onWait, opts) => A.drawPicture(state.settings, prompt, onWait, opts, PIC_ENV), models: comfyModels, refs: () => A.comfyRefs(state.settings, PIC_ENV), landed: () => { if (here()) render(); } };
   try {
     const left = story.comicCut.helper || await helperUp('comic') ? await onHelperComic(story, io) : null;
     ui.status = left === null ? await A.comicJob(state, story, story.comicCut, io) : left; // no helper, or it lost the job: draw here
@@ -620,7 +620,7 @@ async function makeComic(story, replan) {
 }
 // Developer view (Settings → Pictures): what each panel was planned as, the exact prompt sent, which model drew it, and its check.
 const panelDev = (p) => state.settings.devPrompts && h('details', { class: 'dev' }, h('summary', {}, 'Prompt'),
-  p.sent && p.sent.prompt ? h('p', {}, h('b', {}, `Sent to ${p.sent.by} (${p.sent.model}${p.sent.why ? ', picked for an ' + p.sent.why : ''}): `), p.sent.prompt) : h('p', {}, h('b', {}, 'Prompt: '), p.prompt),
+  p.sent && p.sent.prompt ? h('p', {}, h('b', {}, `Sent to ${p.sent.by} (${p.sent.model}${p.sent.why ? ', picked for an ' + p.sent.why : ''}${p.sent.refs ? `, with ${p.sent.refs} reference picture${p.sent.refs > 1 ? 's' : ''}` : ''}): `), p.sent.prompt) : h('p', {}, h('b', {}, 'Prompt: '), p.prompt),
   p.check && h('p', {}, h('b', {}, 'Picture check: '), p.check),
   p.scene && h('p', {}, h('b', {}, 'Plan: '), JSON.stringify({ quote: p.quote, setting: p.setting, characters: p.characters, clothes: p.clothes, explicit: p.explicit })));
 const comicView = (story) => h('div', { class: 'comic' }, story.panels.map((p, i) => h('figure', {},
