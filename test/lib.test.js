@@ -571,3 +571,16 @@ test('each person\'s own pose goes in their own chunk, right after their head ta
   assert.match(p.prompt, /BREAK 1boy, sitting up, awake, black hair BREAK 1girl, lying on side, asleep, red hair, red dress BREAK/);
   assert.deepStrictEqual(A.applyPanelCheck([p], { fixes: [{ panel: 1, poses: { Ben: 'standing' } }] })[0].poses.Ben, 'standing');
 });
+
+test('two people are pinned to their own side of the picture in ComfyUI', async () => {
+  let wf;
+  const env = { fetch: async (url, o) => { wf = JSON.parse(o.body).prompt; throw new Error('stop'); } };
+  await A.drawPicture({ comfyUrl: 'http://pc', comfyModel: 'm', privateOnly: true }, '1girl, 1boy, hug BREAK 1boy, black hair BREAK 1girl, red hair BREAK on a pier BREAK manhwa',
+    () => {}, { nsfw: false, width: 512, height: 768 }, env).catch(() => {});
+  // shared chunks joined (head, scene, style), each person's chunk on top of the head chunk, in its own strip
+  assert.deepStrictEqual([wf[201].inputs.conditioning_from, wf[202].inputs.conditioning_from], [['103', 0], ['104', 0]]);
+  assert.deepStrictEqual(wf[300].inputs, { conditioning_to: ['100', 0], conditioning_from: ['101', 0] });
+  assert.deepStrictEqual([wf[301].inputs.x, wf[311].inputs.x, wf[301].inputs.width, wf[301].inputs.height], [0, 336, 496, 1280]);
+  assert.deepStrictEqual(wf[312].inputs.conditioning_1, ['302', 0]);
+  assert.deepStrictEqual(wf[5].inputs.positive, ['312', 0]);
+});

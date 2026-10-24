@@ -540,7 +540,7 @@
     '  "setting": "where this happens, the same words every panel in that place (e.g. office, desk, window, night)",\n' +
     '  "tags": "4-8 comma-separated anime image tags for the camera angle, framing, lighting and any act the people share (e.g. from side, medium shot, night, hug). No hair, eyes or body tags: those come from the cast list",\n' +
     '  "poses": {"name": "this person\'s own pose, action and expression as 3-6 tags (e.g. sitting up, looking down, worried; or lying on side, asleep), so each person is drawn doing their own thing"},\n' +
-    '  "characters": ["names of every character in this panel, including anyone only partly in frame"],\n' +
+    '  "characters": ["names of every character physically in this panel, including anyone only partly in frame; not someone only seen on a screen or photo, heard, or thought about (put that in scene, e.g. phone screen showing a woman)"],\n' +
     '  "clothes": {"name": "only the clothing they wear in this panel as tags (e.g. red dress, bare feet), or nude; the same outfit until the story changes it. No body parts or hair"},\n' +
     '  "explicit": false, "caption": "short narration box, or empty", "dialogue": [{"name": "speaker", "line": "under 20 words"}]}]}\n';
   // part: one piece of comicParts(story.text); n: panels for it; prev: the panel before it, so places and outfits carry over.
@@ -560,7 +560,7 @@
     const chars = state.characters.filter((c) => (story.characterIds || []).includes(c.id));
     const list = panels.map((p, i) => JSON.stringify({ panel: i + 1, quote: p.quote, scene: p.scene, setting: p.setting, characters: p.characters, poses: p.poses, clothes: p.clothes, explicit: p.explicit })).join('\n');
     const user = `Characters:\n${castSheet(chars)}\n\nStory text:\n"""${String(part).slice(0, 20000)}"""\n\nComic panels planned for this text:\n${list}\n\n` +
-      'Fact-check the panels against the story text and the characters. Fix any panel that is out of story order, shows something that does not happen in the text, has the wrong people in it, ' +
+      'Fact-check the panels against the story text and the characters. Fix any panel that is out of story order, shows something that does not happen in the text, has the wrong people in it (only people physically there count, not someone on a screen or in a photo), ' +
       'has someone wearing or doing something that contradicts the text, or is marked explicit when nobody in it is undressed (or not explicit when they are). ' +
       'Return JSON: {"order": [panel numbers in correct story order], "fixes": [{"panel": 1, plus only the fields that change: "scene", "setting", "tags", "characters", "poses", "clothes", "explicit"}]}. ' +
       'Return {"order": [], "fixes": []} when everything is right.';
@@ -1064,12 +1064,25 @@
     };
     // Each BREAK chunk is encoded on its own (nodes 100+) and joined in order (nodes 200+), so every chunk gets the model's full attention.
     prompt = `masterpiece, best quality, absurdres, ${prompt}`;
-    let positive;
-    prompt.split(/\s*\bBREAK\b\s*/).filter(Boolean).forEach((text, i) => {
-      workflow[100 + i] = { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text } };
-      positive = i ? (workflow[200 + i] = { class_type: 'ConditioningConcat', inputs: { conditioning_to: positive, conditioning_from: [String(100 + i), 0] } }, [String(200 + i), 0]) : ['100', 0];
-    });
-    workflow[5].inputs.positive = positive;
+    const chunks = prompt.split(/\s*\bBREAK\b\s*/).filter(Boolean);
+    chunks.forEach((text, i) => { workflow[100 + i] = { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text } }; });
+    const join = (ids, at) => ids.reduce((to, id, k) => (k ? (workflow[at + k] = { class_type: 'ConditioningConcat', inputs: { conditioning_to: to, conditioning_from: [String(100 + id), 0] } }, [String(at + k), 0]) : [String(100 + id), 0]), null);
+    // Two or more people (chunks that start with their own 1girl/1boy): words alone wash over the whole picture and the people blend,
+    // so each person's chunk is pinned to their own strip, side by side, overlapping a little (nodes 300+), on top of the shared chunks.
+    const people = chunks.map((t, i) => (i && /^\d(girl|boy)\b/.test(t) ? i : -1)).filter((i) => i > 0);
+    if (people.length < 2) workflow[5].inputs.positive = join(chunks.map((t, i) => i), 200);
+    else {
+      let positive = join(chunks.map((t, i) => i).filter((i) => !people.includes(i)), 200);
+      const W = px(width), H = px(height), w = Math.round((W * Math.min(1, 1.2 / people.length)) / 8) * 8;
+      people.forEach((id, k) => {
+        const n = 300 + k * 10;
+        workflow[n] = { class_type: 'ConditioningConcat', inputs: { conditioning_to: ['100', 0], conditioning_from: [String(100 + id), 0] } };
+        workflow[n + 1] = { class_type: 'ConditioningSetArea', inputs: { conditioning: [String(n), 0], width: w, height: H, x: Math.round((k * (W - w)) / (people.length - 1) / 8) * 8, y: 0, strength: 1 } };
+        workflow[n + 2] = { class_type: 'ConditioningCombine', inputs: { conditioning_1: positive, conditioning_2: [String(n + 1), 0] } };
+        positive = [String(n + 2), 0];
+      });
+      workflow[5].inputs.positive = positive;
+    }
     const res = await env.fetch(comfyBase(s) + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }), signal });
     const job = await res.json().catch(() => ({}));
     if (!res.ok || !job.prompt_id) throw new Error(`ComfyUI refused the picture (${(job.error && job.error.message) || res.status}).`);
