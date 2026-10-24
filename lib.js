@@ -383,7 +383,11 @@
     if (start < 0 || end <= start) throw new Error('No JSON object in model reply');
     const raw = text.slice(start, end + 1);
     try { return JSON.parse(raw); } catch (e) {
-      try { return JSON.parse(repairJson(raw)); } catch (e2) { throw e; }
+      try { return JSON.parse(repairJson(raw)); } catch (e2) {
+        // Show the bit of the reply that broke, so the next report says what the AI actually wrote.
+        const at = Number((/position (\d+)/.exec(e.message) || [])[1]);
+        throw new SyntaxError(isNaN(at) ? e.message : `${e.message}. The AI wrote: …${raw.slice(Math.max(0, at - 80), at + 40)}…`);
+      }
     }
   }
   // The usual slips in long replies: "quotes" inside dialogue left unescaped, raw line breaks in strings, trailing commas.
@@ -393,6 +397,8 @@
     for (let i = 0; i < raw.length; i++) {
       const c = raw[i];
       if (inStr && c === '\\') { out += c + (raw[++i] || ''); continue; }
+      const key = !inStr && /[{,]\s*$/.test(out) && /^([A-Za-z_]\w*)\s*:/.exec(raw.slice(i, i + 40)); // {name: "x"} → {"name": "x"}
+      if (key) { out += `"${key[1]}"`; i += key[1].length - 1; continue; }
       if (c === '"') {
         if (!inStr) inStr = true;
         else if (/^\s*([,:}\]]|$)/.test(raw.slice(i + 1, i + 20))) inStr = false;
@@ -862,7 +868,9 @@
     const res = await fetch(s.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
       method: 'POST', headers, signal,
       // Private mode: OpenRouter only routes to providers that don't store or train on prompts.
-      body: JSON.stringify({ model: s.model, models: freeFallbacks(s.baseUrl, s.model) || undefined, messages, temperature: Number(s.temperature) || 0.9, stream,
+      body: JSON.stringify({ model: s.model, models: freeFallbacks(s.baseUrl, s.model) || undefined, messages, stream,
+        // Unstreamed calls want JSON back, and a hot temperature is what makes models slip on quotes and commas.
+        temperature: stream ? Number(s.temperature) || 0.9 : Math.min(Number(s.temperature) || 0.9, 0.5),
         ...(s.privateOnly && s.baseUrl.includes('openrouter.ai') ? { provider: { data_collection: 'deny' } } : {}) }),
     });
     if (!res.ok) {

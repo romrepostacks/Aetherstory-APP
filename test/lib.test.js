@@ -64,6 +64,8 @@ test('parseJsonLoose handles fenced replies', () => {
   // unescaped dialogue quotes, a raw line break and a trailing comma
   assert.deepEqual(A.parseJsonLoose('{"panels": [{"say": "She yells "Run!" at him", "scene": "rain\nfalls",},]}'),
     { panels: [{ say: 'She yells "Run!" at him', scene: 'rain\nfalls' }] });
+  assert.deepEqual(A.parseJsonLoose('{panels: [{say: "hi", explicit: false}]}'), { panels: [{ say: 'hi', explicit: false }] });
+  assert.throws(() => A.parseJsonLoose('{"a": [1 2]}'), /The AI wrote/);
 });
 
 test('parseSSE splits tokens and keeps partial lines', () => {
