@@ -553,3 +553,10 @@ test('ComfyUI gets each BREAK chunk encoded on its own and joined in order', asy
   assert.deepStrictEqual(wf[5].inputs.positive, ['202', 0]);
   assert.strictEqual(wf[5].inputs.cfg, 5);
 });
+
+test('panels that shorten names to first names still get each person\'s looks', () => {
+  const s = A.emptyState();
+  s.characters.push({ id: 'a', name: 'Ana Reyes', appearance: 'She', lookTags: '1girl, red hair' }, { id: 'b', name: 'Ben Okafor', appearance: 'He', lookTags: '1boy, black hair' });
+  assert.strictEqual(A.panelPrompt(s, { scene: 'Ana kisses Ben', characters: ['Ana', 'ben', 'Ana Reyes'], clothes: { Ana: 'dress' }, tags: 'kiss' }),
+    '1girl, 1boy, kiss BREAK 1girl, red hair, dress BREAK 1boy, black hair BREAK the red hair girl kisses the black hair man BREAK manhwa, webtoon, anime coloring, cel shading, clean lineart, detailed background');
+});

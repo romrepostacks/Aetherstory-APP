@@ -584,7 +584,7 @@
   function applyLooks(chars, r) {
     const looks = (r && r.looks) || {};
     for (const c of chars) {
-      const k = Object.keys(looks).find((n) => n.toLowerCase() === c.name.toLowerCase());
+      const k = Object.keys(looks).find((n) => n.toLowerCase() === c.name.toLowerCase()) || Object.keys(looks).find((n) => n.toLowerCase().trim().split(/\s+/)[0] === c.name.toLowerCase().trim().split(/\s+/)[0]);
       if (k && str(looks[k])) { c.lookTags = str(looks[k]); c.lookFrom = c.appearance; }
     }
   }
@@ -594,9 +594,15 @@
   const BODY_TAG = /\b(tall|short stature|petite|slim|skinny|chubby|plump|curvy|muscular|athletic|broad|build|legs|thighs|hips|waist|height|toned|abs|shoulders|stocky|lanky)\b/i;
   const CLOSE_SHOT = /close-up|closeup|portrait|face focus|upper body|head shot/i;
   const tagList = (t) => String(t || '').split(',').map((x) => x.trim()).filter(Boolean);
+  // The planner often shortens names in later parts ("Ana" for "Ana Reyes"). A panel that loses its people that way has nobody's looks in it,
+  // so the model invents one blended person. Exact names win; otherwise a matching first name counts.
+  const firstName = (n) => String(n).toLowerCase().trim().split(/\s+/)[0];
+  const sameName = (a, b) => String(a).toLowerCase().trim() === String(b).toLowerCase().trim();
+  const castMember = (state, n) => state.characters.find((c) => sameName(c.name, n)) || state.characters.find((c) => firstName(c.name) === firstName(n));
+  const panelCast = (state, panel) => [...new Set(strList(panel && panel.characters).map((n) => castMember(state, n)).filter(Boolean))];
   function panelPrompt(state, panel) {
-    const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
-    const clothes = (c) => { const v = (panel.clothes || {})[Object.keys(panel.clothes || {}).find((n) => n.toLowerCase() === c.name.toLowerCase())]; return str(v); };
+    const who = panelCast(state, panel);
+    const clothes = (c) => { const ks = Object.keys(panel.clothes || {}); return str((panel.clothes || {})[ks.find((n) => sameName(n, c.name)) || ks.find((n) => firstName(n) === firstName(c.name))]); };
     const tags = str(panel && panel.tags), close = CLOSE_SHOT.test(tags);
     // Each person's own chunk starts with their own head tag, so two people's hair, build and clothes stay apart instead of blending.
     // Only what the camera sees: a close-up drops build and size tags. About 12 body tags and 4 clothes tags each.
@@ -643,7 +649,7 @@
   }
   // The picture check: a vision model compares the drawn panel with what it should show.
   function buildPictureCheckMessages(state, panel, img) {
-    const who = strList(panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
+    const who = panelCast(state, panel);
     const text = `This is a drawn comic panel. It should show: ${panel.scene}${panel.setting ? ' Setting: ' + panel.setting + '.' : ''}\n` +
       `People in it (${who.length || 'none'}): ${who.map((c) => `${c.name}: ${c.lookTags || c.appearance || ''}`).join('; ') || 'none'}.\n` +
       (panel.explicit ? 'It is an intimate adult scene, so nudity is expected.\n' : 'Nobody in it should be nude or sexual.\n') +
