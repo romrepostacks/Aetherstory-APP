@@ -64,6 +64,8 @@ test('parseJsonLoose handles fenced replies', () => {
   // unescaped dialogue quotes, a raw line break and a trailing comma
   assert.deepEqual(A.parseJsonLoose('{"panels": [{"say": "She yells "Run!" at him", "scene": "rain\nfalls",},]}'),
     { panels: [{ say: 'She yells "Run!" at him', scene: 'rain\nfalls' }] });
+  assert.deepEqual(A.parseJsonLoose('{panels: [{say: "hi", explicit: false}]}'), { panels: [{ say: 'hi', explicit: false }] });
+  assert.throws(() => A.parseJsonLoose('{"a": [1 2]}'), /The AI wrote/);
 });
 
 test('parseSSE splits tokens and keeps partial lines', () => {
@@ -368,9 +370,9 @@ test('comic panels swap names for written appearance in the image prompt', () =>
     { scene: '' },
   ] });
   assert.strictEqual(panels.length, 1);
-  assert.match(panels[0].prompt, /anime manhwa/);
-  // people right after the counts, each with their own head tag; names in the scene become looks
-  assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side, clothed\. \(1girl, tall, red braid, green coat\) and \(1boy, a man\)\. the girl on a rainy pier/);
+  assert.match(panels[0].prompt, /manhwa, webtoon/);
+  // chunks: counts and action, then each person with their own head tag, then the scene with names turned into looks
+  assert.match(panels[0].prompt, /^1girl, 1boy, hug, from side, clothed BREAK 1girl, tall, red braid, green coat BREAK 1boy, a man BREAK the girl on a rainy pier/);
   assert.doesNotMatch(panels[0].prompt, /Ana:/);
   assert.deepStrictEqual(panels[0].dialogue, [{ name: 'Ana', line: 'Wait.' }]);
   assert.match(A.buildPanelMessages(s, { title: 'T', text: 'Once.', characterIds: ['a'] })[1].content, /- Ana: tall, red braid/);
@@ -386,7 +388,9 @@ test('comic panels keep story order, fixed body tags, scene clothes, and are exp
     { quote: 'Under the RAIN', scene: 'rain close-up', characters: [] },
   ] }, part);
   assert.deepStrictEqual(panels.map((p) => p.scene), ['Ana at her desk', 'kiss on pier', 'rain close-up']);
-  assert.match(panels[0].prompt, /^1girl, sitting, typing, clothed\. \(1girl, adult, muscular, tall, red braid, wearing white blouse\)\. the red braid girl at her desk\. office\./);
+  assert.match(panels[0].prompt, /^1girl, sitting, typing, clothed BREAK 1girl, adult, muscular, tall, red braid, white blouse BREAK the red braid girl at her desk, office BREAK/);
+  // a close-up keeps only what the camera sees: no build or size tags
+  assert.match(A.panelPrompt(s, { ...panels[0], tags: 'close-up, smile' }), /BREAK 1girl, adult, red braid, white blouse BREAK/);
   assert.strictEqual(panels[1].explicit, true);
   assert.doesNotMatch(panels[1].prompt, /clothed/);
   assert.match(panels[2].prompt, /^no humans/);
@@ -537,4 +541,15 @@ test('pickModel sends explicit panels to a model that can draw them and the rest
   assert.equal(A.pickModel({ comfyNsfwModel: 'mine.safetensors' }, models, true).model, 'mine.safetensors');
   assert.equal(A.pickModel({ comfyModel: 'animagine-xl-4.0.safetensors' }, ['animagine-xl-4.0.safetensors'], true).model, 'animagine-xl-4.0.safetensors');
   assert.equal(A.pickModel({}, [], false), null);
+});
+
+test('ComfyUI gets each BREAK chunk encoded on its own and joined in order', async () => {
+  let wf;
+  const env = { fetch: async (url, o) => { wf = JSON.parse(o.body).prompt; throw new Error('stop'); } };
+  await A.drawPicture({ comfyUrl: 'http://pc', comfyModel: 'm', privateOnly: true }, 'a BREAK b BREAK c', () => {}, { nsfw: false }, env).catch(() => {});
+  assert.deepStrictEqual([wf[100].inputs.text, wf[101].inputs.text, wf[102].inputs.text], ['masterpiece, best quality, absurdres, a', 'b', 'c']);
+  assert.deepStrictEqual(wf[202].inputs, { conditioning_to: ['201', 0], conditioning_from: ['102', 0] });
+  assert.deepStrictEqual(wf[201].inputs.conditioning_to, ['100', 0]);
+  assert.deepStrictEqual(wf[5].inputs.positive, ['202', 0]);
+  assert.strictEqual(wf[5].inputs.cfg, 5);
 });

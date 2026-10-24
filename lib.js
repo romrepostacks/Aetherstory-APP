@@ -383,7 +383,11 @@
     if (start < 0 || end <= start) throw new Error('No JSON object in model reply');
     const raw = text.slice(start, end + 1);
     try { return JSON.parse(raw); } catch (e) {
-      try { return JSON.parse(repairJson(raw)); } catch (e2) { throw e; }
+      try { return JSON.parse(repairJson(raw)); } catch (e2) {
+        // Show the bit of the reply that broke, so the next report says what the AI actually wrote.
+        const at = Number((/position (\d+)/.exec(e.message) || [])[1]);
+        throw new SyntaxError(isNaN(at) ? e.message : `${e.message}. The AI wrote: …${raw.slice(Math.max(0, at - 80), at + 40)}…`);
+      }
     }
   }
   // The usual slips in long replies: "quotes" inside dialogue left unescaped, raw line breaks in strings, trailing commas.
@@ -393,6 +397,8 @@
     for (let i = 0; i < raw.length; i++) {
       const c = raw[i];
       if (inStr && c === '\\') { out += c + (raw[++i] || ''); continue; }
+      const key = !inStr && /[{,]\s*$/.test(out) && /^([A-Za-z_]\w*)\s*:/.exec(raw.slice(i, i + 40)); // {name: "x"} → {"name": "x"}
+      if (key) { out += `"${key[1]}"`; i += key[1].length - 1; continue; }
       if (c === '"') {
         if (!inStr) inStr = true;
         else if (/^\s*([,:}\]]|$)/.test(raw.slice(i + 1, i + 20))) inStr = false;
@@ -562,7 +568,7 @@
   }
   // About one panel per 150 words, like a webtoon episode: a 3000-word story gets 20.
   const panelCount = (text) => Math.min(40, Math.max(8, Math.round(wordCount(text) / 150)));
-  const COMIC_STYLE = 'anime manhwa webtoon panel, 2d illustration, full color, clean line art, flat cel shading, anime eyes, detailed drawn background';
+  const COMIC_STYLE = 'manhwa, webtoon, anime coloring, cel shading, clean lineart, detailed background';
   const gendered = (c, f, m, x) => ({ f, m }[characterGender(c)] || x);
   // Fixed body tags per character, written once from their sheet and reused in every panel so build, size and face don't drift.
   // lookFrom remembers the appearance they came from, so editing the character makes new ones.
@@ -583,24 +589,34 @@
     }
   }
   // The image model knows nothing about the cast, so each visible character's name becomes their fixed body tags plus this panel's clothes.
-  // Image models weigh the start of a prompt most, so the head count and action tags come first, then the scene, looks and the art style.
+  // The prompt comes in chunks joined by BREAK: the image model reads about 75 words at a time, and ComfyUI gives each chunk its own full
+  // weight (drawComfy encodes them one by one), so nothing slides into a weak tail. Chunks: who and what they do, each person, the scene, the style.
+  const BODY_TAG = /\b(tall|short stature|petite|slim|skinny|chubby|plump|curvy|muscular|athletic|broad|build|legs|thighs|hips|waist|height|toned|abs|shoulders|stocky|lanky)\b/i;
+  const CLOSE_SHOT = /close-up|closeup|portrait|face focus|upper body|head shot/i;
+  const tagList = (t) => String(t || '').split(',').map((x) => x.trim()).filter(Boolean);
   function panelPrompt(state, panel) {
     const who = strList(panel && panel.characters).map((n) => state.characters.find((c) => c.name.toLowerCase() === n.toLowerCase())).filter(Boolean);
     const clothes = (c) => { const v = (panel.clothes || {})[Object.keys(panel.clothes || {}).find((n) => n.toLowerCase() === c.name.toLowerCase())]; return str(v); };
-    // Each person's looks start with their own head tag, so the model keeps two people's hair, build and clothes apart instead of blending them into one.
-    const own = (c) => ({ f: '1girl, ', m: '1boy, ' })[characterGender(c)] || '';
-    const look = (c) => c.lookTags || (c.appearance ? c.appearance.slice(0, 160) : gendered(c, 'a woman', 'a man', 'a person'));
-    const looks = who.map((c) => `(${who.length > 1 && !/^\d(girl|boy)/.test(look(c)) ? own(c) : ''}${look(c)}${clothes(c) ? ', wearing ' + clothes(c) : ''})`).join(' and ');
+    const tags = str(panel && panel.tags), close = CLOSE_SHOT.test(tags);
+    // Each person's own chunk starts with their own head tag, so two people's hair, build and clothes stay apart instead of blending.
+    // Only what the camera sees: a close-up drops build and size tags. About 12 body tags and 4 clothes tags each.
+    const own = (c) => ({ f: '1girl', m: '1boy' })[characterGender(c)] || '';
+    const person = (c) => {
+      let look = c.lookTags ? tagList(c.lookTags) : [c.appearance ? c.appearance.slice(0, 160) : gendered(c, 'a woman', 'a man', 'a person')];
+      if (close) look = look.filter((t) => !BODY_TAG.test(t) || /hair|eyes|breasts/i.test(t));
+      if (who.length > 1 && own(c) && !/^\d(girl|boy)/.test(look[0] || '')) look.unshift(own(c));
+      return [...look.slice(0, 12), ...tagList(clothes(c)).slice(0, 4)].join(', ');
+    };
     // Names mean nothing to an image model, so in the scene each one becomes a short look ("red hair girl"), which ties the action to the right person.
-    const short = (c) => `${String(c.lookTags || '').split(',').map((t) => t.trim()).filter((t) => /hair|braid|ponytail|twintail|\bbob\b|\bbun\b/.test(t))[0] || ''} ${gendered(c, 'girl', 'man', 'person')}`.trim();
+    const short = (c) => `${tagList(c.lookTags).filter((t) => /hair|braid|ponytail|twintail|\bbob\b|\bbun\b/.test(t))[0] || ''} ${gendered(c, 'girl', 'man', 'person')}`.trim();
     let scene = str(panel && panel.scene);
     for (const c of who) for (const n of new Set([c.name, c.name.split(' ')[0]])) scene = scene.replace(new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}('s)?\\b`, 'gi'), (m, poss) => `the ${short(c)}${poss || ''}`);
+    scene = scene.split(/\s+/).slice(0, 35).join(' '); // the scene is backup for what the action tags miss, so it stays short
     // Anime models are trained on head-count tags (1girl, 2boys), so without them a two-person act often comes out as one person.
     const count = (g, word) => { const n = who.filter((c) => characterGender(c) === g).length; return n ? `${n}${word}${n > 1 ? 's' : ''}` : ''; };
     const heads = [count('f', 'girl'), count('m', 'boy')].filter(Boolean).join(', ') || (who.length ? '' : 'no humans');
-    // The people come right after the counts: image models weigh the start of a prompt most, and a long scene would push them out of reach.
-    return [[heads, str(panel && panel.tags), panel && panel.explicit === false ? 'clothed' : ''].filter(Boolean).join(', '),
-      looks, scene, str(panel && panel.setting), COMIC_STYLE].filter(Boolean).join('. ').slice(0, 1500);
+    return [[heads, tags, panel && panel.explicit === false ? 'clothed' : ''].filter(Boolean).join(', '),
+      ...who.map(person), [scene, str(panel && panel.setting)].filter(Boolean).join(', '), COMIC_STYLE].filter(Boolean).join(' BREAK ').slice(0, 1500);
   }
   // A head-and-shoulders picture from the written appearance only; the name means nothing to the image model.
   const PORTRAIT_STYLE = 'anime portrait, head and shoulders, looking at viewer, manhwa webtoon style, 2d illustration, full color, clean line art, flat cel shading, anime eyes, simple soft background';
@@ -862,7 +878,9 @@
     const res = await fetch(s.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
       method: 'POST', headers, signal,
       // Private mode: OpenRouter only routes to providers that don't store or train on prompts.
-      body: JSON.stringify({ model: s.model, models: freeFallbacks(s.baseUrl, s.model) || undefined, messages, temperature: Number(s.temperature) || 0.9, stream,
+      body: JSON.stringify({ model: s.model, models: freeFallbacks(s.baseUrl, s.model) || undefined, messages, stream,
+        // Unstreamed calls want JSON back, and a hot temperature is what makes models slip on quotes and commas.
+        temperature: stream ? Number(s.temperature) || 0.9 : Math.min(Number(s.temperature) || 0.9, 0.5),
         ...(s.privateOnly && s.baseUrl.includes('openrouter.ai') ? { provider: { data_collection: 'deny' } } : {}) }),
     });
     if (!res.ok) {
@@ -1012,15 +1030,23 @@
     const small = 768 / Math.max(width, height); // sent back at 768px: what the library keeps anyway, and a lighter upload to the picture check
     const workflow = {
       1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
-      2: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: (prompt = `masterpiece, best quality, ${prompt}, anime style, 2d illustration`) } },
       3: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: NEGATIVE + (nsfw ? '' : ', nsfw, nude') } },
       4: { class_type: 'EmptyLatentImage', inputs: { width: px(width), height: px(height), batch_size: 1 } },
-      5: { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0],
-        seed: seed ?? Math.floor(Math.random() * 2 ** 32), steps: 20, cfg: 7, sampler_name: 'euler_ancestral', scheduler: 'normal', denoise: 1 } },
+      // Animagine XL 4 and NoobAI both suggest CFG about 5 and 28 steps with Euler a.
+      5: { class_type: 'KSampler', inputs: { model: ['1', 0], positive: null, negative: ['3', 0], latent_image: ['4', 0],
+        seed: seed ?? Math.floor(Math.random() * 2 ** 32), steps: 28, cfg: 5, sampler_name: 'euler_ancestral', scheduler: 'normal', denoise: 1 } },
       6: { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
       7: { class_type: 'ImageScale', inputs: { image: ['6', 0], upscale_method: 'area', width: Math.round(width * small), height: Math.round(height * small), crop: 'disabled' } },
       8: { class_type: 'PreviewImage', inputs: { images: ['7', 0] } }, // ComfyUI's temp folder: nothing piles up in its output folder
     };
+    // Each BREAK chunk is encoded on its own (nodes 100+) and joined in order (nodes 200+), so every chunk gets the model's full attention.
+    prompt = `masterpiece, best quality, absurdres, ${prompt}`;
+    let positive;
+    prompt.split(/\s*\bBREAK\b\s*/).filter(Boolean).forEach((text, i) => {
+      workflow[100 + i] = { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text } };
+      positive = i ? (workflow[200 + i] = { class_type: 'ConditioningConcat', inputs: { conditioning_to: positive, conditioning_from: [String(100 + i), 0] } }, [String(200 + i), 0]) : ['100', 0];
+    });
+    workflow[5].inputs.positive = positive;
     const res = await env.fetch(comfyBase(s) + '/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: workflow }), signal });
     const job = await res.json().catch(() => ({}));
     if (!res.ok || !job.prompt_id) throw new Error(`ComfyUI refused the picture (${(job.error && job.error.message) || res.status}).`);
@@ -1040,7 +1066,7 @@
   }
   async function drawHorde(s, prompt, onWait, { width, height, nsfw, signal, seed }, env) {
     const headers = { 'Content-Type': 'application/json', apikey: s.hordeKey || '0000000000', 'Client-Agent': 'Aetherstory:1:github.com/romrepostacks/Aetherstory-APP' };
-    prompt = `anime style, 2d illustration, ${prompt} ### ${NEGATIVE}${nsfw ? '' : ', nsfw, nude'}`;
+    prompt = `anime style, 2d illustration, ${prompt.replace(/\s*\bBREAK\b\s*/g, ', ')} ### ${NEGATIVE}${nsfw ? '' : ', nsfw, nude'}`; // Horde has no chunks
     const res = await env.fetch(HORDE + '/generate/async', { method: 'POST', headers, body: JSON.stringify({ prompt,
       params: { width, height, steps: 25, n: 1, sampler_name: 'k_euler_a', cfg_scale: 7, ...(seed != null ? { seed: String(seed) } : {}) }, nsfw, censor_nsfw: false, r2: false, models: ANIME_MODELS }), signal });
     const job = await res.json().catch(() => ({}));
