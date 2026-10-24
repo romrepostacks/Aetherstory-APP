@@ -618,17 +618,20 @@ test('reference pictures steer each person\'s own strip through IPAdapter, and a
 test('a comic draws a reference picture per character once, then hands them to each panel', async () => {
   const s = A.emptyState();
   Object.assign(s.settings, { comfyUrl: 'http://pc', checkPictures: false });
-  s.characters.push({ id: 'a', name: 'Ana', appearance: 'She', lookTags: '1girl, red hair', lookFrom: 'She' }, { id: 'b', name: 'Ben', appearance: 'He', lookTags: '1boy, black hair', lookFrom: 'He', ref: 'data:old', refFrom: '1boy, black hair' });
-  const story = { id: 's', text: 'x', characterIds: ['a', 'b'], panels: [{ scene: 'Ana hugs Ben', characters: ['Ana', 'Ben'] }] };
+  s.characters.push({ id: 'a', name: 'Ana', appearance: 'She', lookTags: '1girl, red hair', lookFrom: 'She' }, { id: 'b', name: 'Ben', appearance: 'He', lookTags: '1boy, black hair', lookFrom: 'He', ref: 'data:old', refFrom: '1boy, black hair' },
+    { id: 'c', name: 'Cy', appearance: 'He', lookTags: '1boy, bald', lookFrom: 'He', portrait: 'data:face' });
+  const story = { id: 's', text: 'x', characterIds: ['a', 'b', 'c'], panels: [{ scene: 'Ana hugs Ben', characters: ['Ana', 'Ben'] }, { scene: 'Cy waves', characters: ['Cy'] }] };
   const calls = [];
   const io = { step() {}, save: async () => {}, landed() {}, json: async () => ({}), models: async () => ['m'], refs: async () => true,
     draw: async (prompt, onWait, opts) => { calls.push({ prompt, refs: opts.refs }); return { img: `data:new${calls.length}`, sent: { by: 'ComfyUI', model: 'm', prompt } }; } };
   await A.comicJob(s, story, {}, io);
-  assert.strictEqual(calls.length, 2); // Ana's reference (Ben's is current), then the panel
+  assert.strictEqual(calls.length, 3); // Ana's reference (Ben's is current, Cy has a portrait), then the two panels
   assert.match(calls[0].prompt, /^solo, upper body.*1girl, red hair/);
   assert.strictEqual(s.characters[0].ref, 'data:new1');
   assert.deepStrictEqual(calls[1].refs, ['data:new1', 'data:old']);
+  assert.deepStrictEqual(calls[2].refs, ['data:face']); // the sheet's portrait is the reference
   // the helper gets the cast's references for a comic, not for a story
   assert.strictEqual(A.helperState(s, story, { panels: true }).characters[0].ref, 'data:new1');
+  assert.strictEqual(A.helperState(s, story, { panels: true }).characters[2].portrait, 'data:face');
   assert.strictEqual(A.helperState(s, story).characters[0].ref, undefined);
 });

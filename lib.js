@@ -996,8 +996,11 @@
     if (ai.model) settings.model = ai.model;
     const stories = state.stories.map((x) => (x === story ? { ...x, panels: panels && x.panels ? x.panels.map((p) => ({ ...p, img: p.img ? 'kept' : '' })) : undefined } : { id: x.id, title: x.title, summary: x.summary, characterIds: x.characterIds, createdAt: x.createdAt, chat: x.chat }));
     const out = JSON.parse(JSON.stringify({ settings, characters: state.characters, world: { ...state.world, ai: undefined }, stories }, noPictures));
-    // A comic job also takes the cast's reference pictures, so the PC doesn't draw them again.
-    if (panels) for (const c of out.characters) { const mine = state.characters.find((x) => x.id === c.id); if (mine.ref && (story.characterIds || []).includes(c.id)) c.ref = mine.ref; }
+    // A comic job also takes the cast's portraits and reference pictures, which the PC's ComfyUI copies faces from.
+    if (panels) for (const c of out.characters) {
+      const mine = state.characters.find((x) => x.id === c.id);
+      if ((story.characterIds || []).includes(c.id)) for (const k of ['portrait', 'ref']) if (mine[k]) c[k] = mine[k];
+    }
     return out;
   }
   // Puts the helper's finished story, world and characters back. Fields the helper never had (pictures, keys) stay as they are.
@@ -1220,10 +1223,11 @@
     let done = 0, canCheck = s.checkPictures !== false, doing = '', checkNote = '', note = '';
     const models = s.comfyUrl && io.models ? await io.models().catch(() => []) : [];
     let model = '';
-    // With IPAdapter on the PC, each character gets a reference picture first (drawn once, redrawn when their body tags change).
+    // With IPAdapter on the PC, each character's portrait from their sheet is their reference picture. Anyone without one gets
+    // a plain reference drawn first (once, redrawn when their body tags change).
     const useRefs = !!(s.comfyUrl && io.refs && await io.refs().catch(() => false));
     if (useRefs) {
-      const need = state.characters.filter((c) => (story.characterIds || []).includes(c.id) && (!c.ref || c.refFrom !== (c.lookTags || c.appearance || '')));
+      const need = state.characters.filter((c) => (story.characterIds || []).includes(c.id) && !c.portrait && (!c.ref || c.refFrom !== (c.lookTags || c.appearance || '')));
       for (const [i, c] of need.entries()) {
         io.step(step, `Drawing a reference picture of ${c.name} (${i + 1} of ${need.length}), so every panel copies the same face and build.`);
         try {
@@ -1244,7 +1248,7 @@
         doing = 'drawing the next'; progress();
         const r = await io.draw(p.scene ? panelPrompt(state, p) : p.prompt, progress,
           { signal, nsfw: explicit, model: pick ? pick.model : (explicit && s.comfyNsfwModel) || undefined, seed: story.seed + (p.redraws || 0) * 7919, onNote: (n) => { note = n; },
-            refs: useRefs && p.scene ? panelCast(state, p).map((c) => c.ref || null) : null });
+            refs: useRefs && p.scene ? panelCast(state, p).map((c) => c.portrait || c.ref || null) : null });
         p.img = r.img; p.sent = { ...r.sent, ...(pick && r.sent.by === 'ComfyUI' ? { why: pick.why } : {}) }; p.check = '';
         await io.save(); io.landed(p);
       };
